@@ -109,7 +109,7 @@ class KimiAudio(object):
         valid_audio_length = 0
 
         for i in tqdm.tqdm(
-            range(max_new_tokens), desc="Generating tokens", disable=False
+            range(max_new_tokens), desc="Generating tokens", disable=True
         ):
             audio_logits, text_logits, past_key_values = self.alm.forward(
                 input_ids=decoder_input_audio_ids,

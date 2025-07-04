@@ -1,0 +1,106 @@
+wandb: Currently logged in as: abdo14hashem15 (abdo14hashem15-personal) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.20.1
+wandb: Run data is saved locally in /home/devs2tnc80adish100v4localadmin/expermental_models/kimi/Kimi-Audio-2/wandb/run-20250618_230240-tbqdjmzr
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run jumping-mountain-13
+wandb: ⭐️ View project at https://wandb.ai/abdo14hashem15-personal/kimi-audio-librispeech-eval
+wandb: 🚀 View run at https://wandb.ai/abdo14hashem15-personal/kimi-audio-librispeech-eval/runs/tbqdjmzr
+2025-06-18 23:02:41.185 | INFO     | kimia_infer.api.kimia:__init__:16 - Loading kimi-audio main model
+Fetching 64 files:   0%|          | 0/64 [00:00<?, ?it/s]Fetching 64 files: 100%|██████████| 64/64 [00:00<00:00, 21110.05it/s]
+2025-06-18 23:02:41.460 | INFO     | kimia_infer.api.kimia:__init__:25 - Looking for resources in /home/devs2tnc80adish100v4localadmin/.cache/huggingface/hub/models--moonshotai--Kimi-Audio-7B-Instruct/snapshots/9a82a84c37ad9eb1307fb6ed8d7b397862ef9e6b
+2025-06-18 23:02:41.460 | INFO     | kimia_infer.api.kimia:__init__:26 - Loading whisper model
+using normal flash attention
+Loading checkpoint shards:   0%|          | 0/36 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 36/36 [00:00<00:00, 830.85it/s]
+Traceback (most recent call last):
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/Kimi-Audio-2/test_asr.py", line 65, in <module>
+    model = KimiAudio(model_path=model_path, load_detokenizer=True)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/Kimi-Audio-2/kimia_infer/api/kimia.py", line 36, in __init__
+    self.prompt_manager = KimiAPromptManager(
+                          ^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/Kimi-Audio-2/kimia_infer/api/prompt_manager.py", line 17, in __init__
+    self.audio_tokenizer = Glm4Tokenizer("THUDM/glm-4-voice-tokenizer")
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/Kimi-Audio-2/kimia_infer/models/tokenizer/glm4_tokenizer.py", line 15, in __init__
+    self.feature_extractor = WhisperFeatureExtractor.from_pretrained(tokenizer_path)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/transformers/feature_extraction_utils.py", line 384, in from_pretrained
+    feature_extractor_dict, kwargs = cls.get_feature_extractor_dict(pretrained_model_name_or_path, **kwargs)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/transformers/feature_extraction_utils.py", line 510, in get_feature_extractor_dict
+    resolved_feature_extractor_file = cached_file(
+                                      ^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/transformers/utils/hub.py", line 312, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/transformers/utils/hub.py", line 470, in cached_files
+    hf_hub_download(
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/file_download.py", line 1008, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/file_download.py", line 1071, in _hf_hub_download_to_cache_dir
+    (url_to_download, etag, commit_hash, expected_size, xet_file_data, head_call_error) = _get_metadata_or_catch_error(
+                                                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/file_download.py", line 1533, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/file_download.py", line 1450, in get_hf_file_metadata
+    r = _request_wrapper(
+        ^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/file_download.py", line 286, in _request_wrapper
+    response = _request_wrapper(
+               ^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/file_download.py", line 309, in _request_wrapper
+    response = http_backoff(method=method, url=url, **params, retry_on_exceptions=(), retry_on_status_codes=(429,))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 310, in http_backoff
+    response = session.request(method=method, url=url, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/requests/sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/requests/sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 96, in send
+    return super().send(request, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/requests/adapters.py", line 667, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/expermental_models/kimi/.venv/lib/python3.12/site-packages/urllib3/connection.py", line 565, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/http/client.py", line 1430, in getresponse
+    response.begin()
+  File "/home/devs2tnc80adish100v4localadmin/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/http/client.py", line 331, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/http/client.py", line 292, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/ssl.py", line 1251, in recv_into
+    return self.read(nbytes, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/devs2tnc80adish100v4localadmin/.local/share/uv/python/cpython-3.12.10-linux-x86_64-gnu/lib/python3.12/ssl.py", line 1103, in read
+    return self._sslobj.read(len, buffer)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33mjumping-mountain-13[0m at: [34mhttps://wandb.ai/abdo14hashem15-personal/kimi-audio-librispeech-eval/runs/tbqdjmzr[0m
+[1;34mwandb[0m: Find logs at: [1;35mwandb/run-20250618_230240-tbqdjmzr/logs[0m
