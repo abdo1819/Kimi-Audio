@@ -51,11 +51,32 @@ class KimiAPromptManager:
         return token_ids
 
     def _tokenize_audio(self, wav_path, force_english=True):
+        """
+        Tokenize audio using GLM4 speech tokenizer.
+        
+        Args:
+            wav_path: Path to audio file
+            force_english: If True, attempts to optimize for English content
+            
+        Note: 
+            The GLM4 speech tokenizer uses vector quantization of speech features
+            rather than text generation, so traditional Whisper language forcing
+            doesn't directly apply. The tokenizer creates discrete representations
+            of speech characteristics rather than language-specific text tokens.
+            
+            For true English-only ASR, you would need to:
+            1. Use a separate English-only ASR model for preprocessing, or
+            2. Apply language detection/filtering at the model inference level, or
+            3. Use the standard Whisper model instead of GLM4 tokenizer
+        """
         if force_english:
-            # Force English language for Whisper tokenization
+            # Pass language parameter to request English tokenization
+            # Note: GLM4 tokenizer accepts this parameter but the underlying
+            # vector quantization approach doesn't use language information
+            # in the same way as standard Whisper text generation
             wav_tokens = self.audio_tokenizer.tokenize(
                 audio_path=wav_path, 
-                language='en'  # Force English
+                language='en'  # Force English (compatibility parameter)
             )
         else:
             wav_tokens = self.audio_tokenizer.tokenize(audio_path=wav_path)

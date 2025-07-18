@@ -37,7 +37,7 @@ def load_quantize_encoder(model_path):
 _resample_buffer: dict[int, torchaudio.transforms.Resample] = {}
 
 
-def extract_speech_token(model: WhisperVQEncoder, feature_extractor: WhisperFeatureExtractor, utts):
+def extract_speech_token(model: WhisperVQEncoder, feature_extractor: WhisperFeatureExtractor, utts, language=None):
     dtype = model.conv1.weight.dtype
     with torch.no_grad():
         audios, indices = [], []
@@ -74,7 +74,10 @@ def extract_speech_token(model: WhisperVQEncoder, feature_extractor: WhisperFeat
                                          padding="longest", pad_to_multiple_of=stride)
             features["input_features"] = features["input_features"].to(torch.cuda.current_device()).to(dtype)
             features["attention_mask"] = features["attention_mask"].to(torch.cuda.current_device())
-            # import ipdb; ipdb.set_trace()
+            
+            # Note: Language parameter is accepted but not used in GLM4 quantization approach
+            # The underlying model uses vector quantization rather than text generation
+            # so language forcing would need to be implemented at a different level
             outputs = model(**features)
             speech_tokens = outputs.quantized_token_ids
             attention_mask = features.attention_mask[:, ::model.conv1.stride[0] * model.conv2.stride[0]]
