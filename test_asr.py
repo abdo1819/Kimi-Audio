@@ -27,6 +27,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import urllib.request
 import time
+import shutil
 
 import wandb
 from tqdm import tqdm
@@ -202,19 +203,24 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
         print(f"   Archive size: {archive_size_mb:.1f} MB")
         print(f"   This may take a few minutes for large archives...")
         
-        # Use tar with progress indication
+        # Use tar with standard options (checkpoint options don't work consistently across systems)
         extract_cmd = ["tar", "-xzf", str(tar_file), "-C", str(cache_root)]
         
-        # Start extraction and show a simple progress indicator
-        print(f"   Extracting", end="", flush=True)
+        # Start extraction and show progress
+        print(f"   Extracting...")
         start_time = time.time()
         
-        # Run extraction in subprocess while showing progress dots
+        # Run extraction in subprocess
         process = subprocess.Popen(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         # Show progress dots while extraction is running
+        dot_count = 0
         while process.poll() is None:
             print(".", end="", flush=True)
+            dot_count += 1
+            if dot_count % 20 == 0:  # New line every 20 dots
+                elapsed = time.time() - start_time
+                print(f" ({elapsed:.0f}s)")
             time.sleep(2)
         
         # Wait for completion
@@ -222,7 +228,76 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
         
         if process.returncode != 0:
             print(f"\n❌ Extraction failed!")
-            raise subprocess.CalledProcessError(process.returncode, extract_cmd, stderr.decode())
+            stderr_text = stderr.decode() if stderr else "No error details"
+            stdout_text = stdout.decode() if stdout else "No output"
+            
+            print(f"   Error details: {stderr_text}")
+            print(f"   Return code: {process.returncode}")
+            
+            # Check for common issues and provide helpful suggestions
+            if process.returncode == 2:
+                print(f"\n🔍 Diagnosing tar exit code 2 (common causes):")
+                
+                # Check file integrity with tar -t
+                print(f"   Checking archive integrity...")
+                try:
+                    test_result = subprocess.run(
+                        ["tar", "-tzf", str(tar_file)], 
+                        capture_output=True, 
+                        text=True, 
+                        timeout=30
+                    )
+                    if test_result.returncode != 0:
+                        print(f"   ❌ Archive appears corrupted (tar -t failed)")
+                        print(f"   💡 Solution: Delete the corrupted file and re-download")
+                        print(f"      rm {tar_file}")
+                        
+                                                 # Offer to delete corrupted file and retry
+                        tar_file.unlink()
+                        print(f"   🗑️ Automatically removed corrupted archive")
+                        print(f"   🔄 Attempting fresh download...")
+                        
+                        # Recursive call to retry download and extraction
+                        return download_librispeech_subset(subset, cache_root)
+                    else:
+                        print(f"   ✅ Archive integrity test passed")
+                except subprocess.TimeoutExpired:
+                    print(f"   ⏰ Archive integrity test timed out (very large archive)")
+                except Exception as e:
+                    print(f"   ⚠️ Could not test archive integrity: {e}")
+                
+                # Check disk space
+                try:
+                    free_space = shutil.disk_usage(cache_root).free
+                    free_space_gb = free_space / (1024**3)
+                    archive_size = tar_file.stat().st_size
+                    archive_size_gb = archive_size / (1024**3)
+                    
+                    print(f"   Disk space: {free_space_gb:.1f} GB free, archive: {archive_size_gb:.1f} GB")
+                    
+                    # LibriSpeech archives typically expand to ~2-3x their compressed size
+                    estimated_extracted_size = archive_size * 2.5
+                    estimated_extracted_gb = estimated_extracted_size / (1024**3)
+                    
+                    if free_space < estimated_extracted_size:
+                        print(f"   ❌ Insufficient disk space!")
+                        print(f"   📊 Need ~{estimated_extracted_gb:.1f} GB for extraction, only {free_space_gb:.1f} GB available")
+                        print(f"   💡 Solutions:")
+                        print(f"      1. Free up disk space (delete {estimated_extracted_gb - free_space_gb:.1f} GB)")
+                        print(f"      2. Use different cache location: export LIBRISPEECH_CACHE=/path/to/larger/disk")
+                        print(f"      3. Use smaller subset (e.g., train-clean-100 instead of train-other-500)")
+                        raise RuntimeError(f"Insufficient disk space for extraction")
+                    elif free_space < estimated_extracted_size * 1.2:  # Less than 20% buffer
+                        print(f"   ⚠️ Disk space is tight! Estimated extraction needs {estimated_extracted_gb:.1f} GB")
+                except Exception as e:
+                    print(f"   ⚠️ Could not check disk space: {e}")
+                
+                # Check permissions
+                if not os.access(cache_root, os.W_OK):
+                    print(f"   ❌ No write permission to cache directory: {cache_root}")
+                    print(f"   💡 Solution: Fix permissions or use different cache location")
+            
+            raise subprocess.CalledProcessError(process.returncode, extract_cmd, stderr_text)
         
         elapsed_time = time.time() - start_time
         print(f"\n✅ Extraction completed in {elapsed_time:.1f}s: {subset_dir}")
