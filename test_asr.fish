@@ -162,15 +162,22 @@ if test $USE_MULTI_GPU = true
     end
     
     # Add all other arguments (excluding our custom ones)
-    for i in (seq (count $argv))
-        switch $argv[$i]
+    set skip_next false
+    for arg in $argv
+        if test $skip_next = true
+            # Skip this argument (it was the value for --num_gpus)
+            set skip_next false
+            continue
+        end
+        
+        switch $arg
             case --num_gpus
-                # Skip this and the next argument
-                set i (math $i + 1)
+                # Skip this argument and the next one (its value)
+                set skip_next true
             case --auto_merge --cleanup
                 # Skip these (already handled)
             case '*'
-                set LAUNCH_CMD $LAUNCH_CMD $argv[$i]
+                set LAUNCH_CMD $LAUNCH_CMD $arg
         end
     end
     
