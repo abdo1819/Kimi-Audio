@@ -20,6 +20,9 @@ import os, re, csv, argparse, tempfile, difflib, sys, shlex
 from pathlib import Path
 import subprocess, json, hashlib, itertools
 from typing import Tuple, Optional
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 import wandb
 from tqdm import tqdm
@@ -29,6 +32,8 @@ import evaluate
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 from kimia_infer.api.kimia import KimiAudio
 from colorama import init as colorama_init, Fore, Style
+import pandas as pd
+from datetime import datetime
 
 colorama_init(autoreset=True)
 # ----------------------- DATASET REGISTRY ----------------------------
@@ -267,28 +272,112 @@ parser.add_argument(
     help="Optional NOTSOFAR tag like '240825.1_dev1' "
          "(overrides the built-in defaults)",
 )
+# Multi-GPU support
+parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (1 or 2)")
+parser.add_argument("--local_rank", type=int, default=0, help="Local rank for distributed processing")
 args = parser.parse_args()
+
+# -------------------------- MULTI-GPU SETUP --------------------------
+def setup_distributed(rank, world_size):
+    """Initialize distributed training"""
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup_distributed():
+    """Clean up distributed training"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+# Set up multi-GPU if requested
+world_size = args.num_gpus
+rank = args.local_rank
+is_distributed = world_size > 1
+
+if is_distributed:
+    setup_distributed(rank, world_size)
+    device = torch.cuda.current_device()
+    print(f"🔧 Initialized process {rank}/{world_size} on GPU {device}")
+else:
+    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+    print(f"🔧 Using single GPU: {device}")
+
+# Only rank 0 handles W&B and main coordination
+is_main_process = rank == 0
 
 # -------------------------- W&B RESUME -------------------------------
 RESUME_FILE = Path(".wandb_run_id")
 prev_id = RESUME_FILE.read_text().strip() if RESUME_FILE.exists() else None
-run = wandb.init(
-    project=args.wandb_project,
-    name=args.wandb_run_name,
-    id=prev_id,
-    resume="allow",
-    config={**vars(args), "model": "moonshotai/Kimi-Audio-7B-Instruct"},
-)
-if prev_id is None:
-    RESUME_FILE.write_text(run.id)
-print(
-    f"\nResume with: WANDB_RUN_ID={run.id} WANDB_RESUME=allow python "
-    + " ".join(map(shlex.quote, sys.argv))
-    + "\n"
-)
+
+# -------------------------- PARQUET SETUP ----------------------------
+# Create output directory for parquet files
+PARQUET_DIR = Path("batch_mistakes_parquet")
+PARQUET_DIR.mkdir(exist_ok=True)
+batch_counter = 0
+
+def save_batch_mistakes_to_parquet(batch_mistakes, batch_id, run_id, rank=0):
+    """Save batch mistakes to a parquet file"""
+    if not batch_mistakes:
+        return None
+    
+    df = pd.DataFrame(batch_mistakes)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"mistakes_batch_{batch_id:04d}_{timestamp}_{run_id[:8]}_rank{rank}.parquet"
+    filepath = PARQUET_DIR / filename
+    df.to_parquet(filepath, index=False)
+    return filepath
+
+# W&B initialization - only on main process
+run = None
+if is_main_process:
+    run = wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_run_name,
+        id=prev_id,
+        resume="allow",
+        config={**vars(args), "model": "moonshotai/Kimi-Audio-7B-Instruct"},
+    )
+    if prev_id is None:
+        RESUME_FILE.write_text(run.id)
+    print(
+        f"\nResume with: WANDB_RUN_ID={run.id} WANDB_RESUME=allow python "
+        + " ".join(map(shlex.quote, sys.argv))
+        + "\n"
+    )
+else:
+    # Non-main processes create a dummy run object for compatibility
+    class DummyRun:
+        def __init__(self):
+            self.id = "dummy_run"
+        def log(self, *args, **kwargs):
+            pass
+        def finish(self, *args, **kwargs):
+            pass
+    run = DummyRun()
 
 # ---------------------------- MODEL ----------------------------------
-model = KimiAudio(model_path="moonshotai/Kimi-Audio-7B-Instruct", load_detokenizer=True)
+class MultiGPUKimiAudio:
+    """Wrapper for multi-GPU KimiAudio inference"""
+    def __init__(self, model_path, load_detokenizer=True, rank=0, world_size=1):
+        self.rank = rank
+        self.world_size = world_size
+        self.model = KimiAudio(model_path=model_path, load_detokenizer=load_detokenizer)
+        
+    def generate(self, chats, **kwargs):
+        """Generate with the model - each GPU handles its own subset"""
+        return self.model.generate(chats, **kwargs)
+
+# Initialize model
+if is_main_process:
+    print("🤖 Loading KimiAudio model...")
+model = MultiGPUKimiAudio(
+    model_path="moonshotai/Kimi-Audio-7B-Instruct", 
+    load_detokenizer=True,
+    rank=rank,
+    world_size=world_size
+)
+
 SAMPLING = dict(
     audio_temperature=0.8,
     audio_top_k=10,
@@ -441,7 +530,8 @@ def _diff(r: str, h: str) -> str:
     return " ".join(out)
 
 # --------------------------- LOAD DATA -------------------------------
-print("Loading dataset…")
+if is_main_process:
+    print("📊 Loading dataset…")
 ds, ds_len = load_corpus(
     args.dataset,
     args.subset,
@@ -449,15 +539,46 @@ ds, ds_len = load_corpus(
     streaming=args.streaming,
     max_samples=args.max_samples,
 )
-print(f"Dataset ready (samples≈{ds_len}).")
+
+# Split dataset across GPUs
+if is_distributed and ds_len:
+    # Calculate samples per GPU
+    samples_per_gpu = ds_len // world_size
+    start_idx = rank * samples_per_gpu
+    end_idx = start_idx + samples_per_gpu if rank < world_size - 1 else ds_len
+    
+    if hasattr(ds, 'select'):
+        # For in-memory datasets
+        ds = ds.select(range(start_idx, end_idx))
+        local_ds_len = end_idx - start_idx
+    else:
+        # For streaming datasets
+        ds = ds.skip(start_idx).take(end_idx - start_idx)
+        local_ds_len = end_idx - start_idx
+    
+    if is_main_process:
+        print(f"📊 Dataset split across {world_size} GPUs:")
+        for i in range(world_size):
+            gpu_start = i * samples_per_gpu
+            gpu_end = gpu_start + samples_per_gpu if i < world_size - 1 else ds_len
+            print(f"   GPU {i}: samples {gpu_start:,} - {gpu_end:,} ({gpu_end-gpu_start:,} samples)")
+else:
+    local_ds_len = ds_len
+
+if is_main_process:
+    print(f"📊 Dataset ready (total≈{ds_len:,}, local≈{local_ds_len:,}).")
 
 # ----------------------- MAIN EVAL LOOP ------------------------------
 results_p, results_r = [], []
 all_mistakes, batch_mistakes, failures = [], [], []
 ser_errors = 0  # sentence error count
 
+# Global counters for distributed processing
+global_idx_offset = rank * (ds_len // world_size) if is_distributed else 0
+
 try:
-    for idx, ex in enumerate(tqdm(ds, total=ds_len, desc="Transcribing")):
+    desc = f"Transcribing (GPU {rank})" if is_distributed else "Transcribing"
+    for idx, ex in enumerate(tqdm(ds, total=local_ds_len, desc=desc)):
         # skip ultra‑short
         if len(ex["audio"]["array"]) < 0.2 * ex["audio"]["sampling_rate"]:
             failures.append({"index": idx, "reason": "too_short"})
@@ -471,7 +592,7 @@ try:
             try:
                 _, out = model.generate(
                     [
-                        {"role": "user", "message_type": "text", "content": "Please transcribe the following audio:"},
+                        {"role": "user", "message_type": "text", "content": "Please transcribe the following english audio:"},
                         {"role": "user", "message_type": "audio", "content": wav_path},
                     ],
                     **SAMPLING,
@@ -491,51 +612,143 @@ try:
 
         if pred != ref:
             entry = dict(
-                index=idx,
+                index=idx + global_idx_offset,  # Use global index
                 reference=ref,
                 prediction=pred,
                 diff=_diff(ref, pred),
                 sample_wer=wer_metric.compute(predictions=[pred], references=[ref]),
                 sample_cer=cer_metric.compute(predictions=[pred], references=[ref]),
+                gpu_rank=rank,  # Track which GPU processed this
             )
             all_mistakes.append(entry); batch_mistakes.append(entry)
 
         # ---- periodic logging ----
         if (idx + 1) % 250 == 0:
-            running_wer = wer_metric.compute(predictions=results_p, references=results_r)
-            running_cer = cer_metric.compute(predictions=results_p, references=results_r)
-            running_ser = ser_errors / (idx + 1)
-            metrics = {
-                "running_wer": running_wer,
-                "running_cer": running_cer,
-                "running_ser": running_ser,
-                "seen_samples": idx + 1,
-                "failed": len(failures),
-            }
+            # Save parquet files on each GPU
             if batch_mistakes:
-                tbl = wandb.Table(columns=list(batch_mistakes[0].keys()))
-                for m in batch_mistakes:
-                    tbl.add_data(*m.values())
-                metrics["new_mistakes"] = tbl
+                parquet_file = save_batch_mistakes_to_parquet(batch_mistakes, batch_counter, run.id, rank)
+                if parquet_file:
+                    print(f"💾 GPU {rank}: Saved {len(batch_mistakes)} mistakes to {parquet_file}")
                 batch_mistakes = []
-            wandb.log(metrics)
+                batch_counter += 1
+            
+            # Only main process handles W&B logging and metric aggregation
+            if is_main_process:
+                # Gather metrics from all GPUs if distributed
+                if is_distributed:
+                    # Collect predictions and references from all GPUs
+                    all_predictions = [None] * world_size
+                    all_references = [None] * world_size
+                    all_errors = [None] * world_size
+                    all_failures = [None] * world_size
+                    
+                    dist.all_gather_object(all_predictions, results_p)
+                    dist.all_gather_object(all_references, results_r)
+                    dist.all_gather_object(all_errors, ser_errors)
+                    dist.all_gather_object(all_failures, len(failures))
+                    
+                    # Flatten lists
+                    global_predictions = [item for sublist in all_predictions for item in sublist]
+                    global_references = [item for sublist in all_references for item in sublist]
+                    global_ser_errors = sum(all_errors)
+                    global_failures = sum(all_failures)
+                    global_samples = len(global_predictions)
+                else:
+                    global_predictions = results_p
+                    global_references = results_r
+                    global_ser_errors = ser_errors
+                    global_failures = len(failures)
+                    global_samples = idx + 1
+                
+                if global_predictions and global_references:
+                    running_wer = wer_metric.compute(predictions=global_predictions, references=global_references)
+                    running_cer = cer_metric.compute(predictions=global_predictions, references=global_references)
+                    running_ser = global_ser_errors / global_samples
+                    
+                    metrics = {
+                        "running_wer": running_wer,
+                        "running_cer": running_cer,
+                        "running_ser": running_ser,
+                        "seen_samples": global_samples,
+                        "failed": global_failures,
+                        "num_gpus": world_size,
+                    }
+                    wandb.log(metrics)
 except KeyboardInterrupt:
-    print("Interrupted – resume later!")
-    wandb.finish(exit_code=255)
+    print(f"🛑 GPU {rank}: Interrupted – resume later!")
+    if is_main_process:
+        wandb.finish(exit_code=255)
+    cleanup_distributed()
     sys.exit(130)
 
 # ------------------------- FINAL METRICS -----------------------------
-final_wer = wer_metric.compute(predictions=results_p, references=results_r)
-final_cer = cer_metric.compute(predictions=results_p, references=results_r)
-final_ser = ser_errors / len(results_p)
-wandb.log({"final_wer": final_wer, "final_cer": final_cer, "final_ser": final_ser, "failed": len(failures)})
+# Save any remaining batch_mistakes to parquet on each GPU
+if batch_mistakes:
+    parquet_file = save_batch_mistakes_to_parquet(batch_mistakes, batch_counter, run.id, rank)
+    if parquet_file:
+        print(f"💾 GPU {rank}: Saved final {len(batch_mistakes)} mistakes to {parquet_file}")
 
-# upload full mistakes
-# 'tbl' not defined
-if all_mistakes:
-    tbl = wandb.Table(columns=list(all_mistakes[0].keys()))
-    for m in all_mistakes:
-        tbl.add_data(*m.values())
-    wandb.log({"error_table": tbl})
+# Aggregate final results from all GPUs
+if is_main_process:
+    if is_distributed:
+        # Gather all results from all GPUs
+        all_predictions = [None] * world_size
+        all_references = [None] * world_size
+        all_errors = [None] * world_size
+        all_failures = [None] * world_size
+        all_mistakes_lists = [None] * world_size
+        
+        dist.all_gather_object(all_predictions, results_p)
+        dist.all_gather_object(all_references, results_r)
+        dist.all_gather_object(all_errors, ser_errors)
+        dist.all_gather_object(all_failures, len(failures))
+        dist.all_gather_object(all_mistakes_lists, all_mistakes)
+        
+        # Flatten and combine all results
+        final_predictions = [item for sublist in all_predictions for item in sublist]
+        final_references = [item for sublist in all_references for item in sublist]
+        final_ser_errors = sum(all_errors)
+        final_failures = sum(all_failures)
+        final_all_mistakes = [item for sublist in all_mistakes_lists for item in sublist]
+    else:
+        final_predictions = results_p
+        final_references = results_r
+        final_ser_errors = ser_errors
+        final_failures = len(failures)
+        final_all_mistakes = all_mistakes
+    
+    if final_predictions and final_references:
+        final_wer = wer_metric.compute(predictions=final_predictions, references=final_references)
+        final_cer = cer_metric.compute(predictions=final_predictions, references=final_references)
+        final_ser = final_ser_errors / len(final_predictions)
+        
+        wandb.log({
+            "final_wer": final_wer, 
+            "final_cer": final_cer, 
+            "final_ser": final_ser, 
+            "failed": final_failures,
+            "total_samples": len(final_predictions),
+            "num_gpus": world_size
+        })
+        
+        print(f"🎯 Final Results:")
+        print(f"   WER: {final_wer:.4f}")
+        print(f"   CER: {final_cer:.4f}")
+        print(f"   SER: {final_ser:.4f}")
+        print(f"   Failed: {final_failures}")
+        print(f"   Total samples: {len(final_predictions):,}")
+        print(f"   GPUs used: {world_size}")
+        
+        # Upload consolidated error table
+        if final_all_mistakes:
+            tbl = wandb.Table(columns=list(final_all_mistakes[0].keys()))
+            for m in final_all_mistakes:
+                tbl.add_data(*m.values())
+            wandb.log({"error_table": tbl})
+    
+    wandb.finish()
+    if RESUME_FILE.exists():
+        RESUME_FILE.unlink(missing_ok=True)
 
-wandb.finish(); RESUME_FILE.unlink(missing_ok=True)
+# Clean up distributed training
+cleanup_distributed()
