@@ -746,7 +746,8 @@ is_distributed = world_size > 1
 if is_distributed:
     setup_distributed(rank, world_size)
     device = torch.cuda.current_device()
-    print(f"🔧 Initialized process {rank}/{world_size} on GPU {device}")
+    visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', 'all')
+    print(f"🔧 Initialized process {rank}/{world_size} on GPU {device} (CUDA_VISIBLE_DEVICES: {visible_devices})")
 else:
     device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
     print(f"🔧 Using single GPU: {device}")
@@ -823,19 +824,43 @@ else:
 
 # ---------------------------- MODEL ----------------------------------
 class MultiGPUKimiAudio:
-    """Wrapper for multi-GPU KimiAudio inference"""
+    """Wrapper for multi-GPU KimiAudio inference with proper CUDA device assignment"""
     def __init__(self, model_path, load_detokenizer=True, rank=0, world_size=1):
         self.rank = rank
         self.world_size = world_size
+        
+        # Set the specific CUDA device for this process
+        if torch.cuda.is_available():
+            # When using CUDA_VISIBLE_DEVICES, visible devices are renumbered starting from 0
+            # So we always use device 0 for each process
+            device = torch.device('cuda:0')
+            torch.cuda.set_device(device)
+            print(f"🔧 GPU {rank}: Using CUDA device {device}")
+        else:
+            device = torch.device('cpu')
+            print(f"⚠️  GPU {rank}: CUDA not available, using CPU")
+        
+        # Initialize model on the specific device
         self.model = KimiAudio(model_path=model_path, load_detokenizer=load_detokenizer)
         
+        # Ensure model is on the correct device
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'to'):
+            self.model.model = self.model.model.to(device)
+        
+        self.device = device
+        
     def generate(self, chats, **kwargs):
-        """Generate with the model - each GPU handles its own subset"""
-        return self.model.generate(chats, **kwargs)
+        """Generate with the model - ensures proper device placement"""
+        # Ensure any tensors are on the correct device before inference
+        with torch.cuda.device(self.device):
+            return self.model.generate(chats, **kwargs)
 
 # Initialize model
 if is_main_process:
-    print("🤖 Loading KimiAudio model...")
+    print(f"🤖 Loading KimiAudio model on {world_size} GPU(s)...")
+elif rank == 1:
+    print(f"🤖 GPU {rank}: Loading KimiAudio model...")
+
 model = MultiGPUKimiAudio(
     model_path="moonshotai/Kimi-Audio-7B-Instruct", 
     load_detokenizer=True,
@@ -1093,8 +1118,19 @@ ser_errors = 0  # sentence error count
 # Global counters for distributed processing
 global_idx_offset = rank * (ds_len // world_size) if is_distributed else 0
 
+# Synchronize all processes before starting inference
+if is_distributed:
+    print(f"🔄 GPU {rank}: Waiting for all GPUs to be ready...")
+    dist.barrier()
+    print(f"✅ GPU {rank}: All GPUs ready, starting inference...")
+
 try:
     desc = f"Transcribing (GPU {rank})" if is_distributed else "Transcribing"
+    
+    # Batch processing for better GPU utilization
+    batch_size = 1  # KimiAudio processes one sample at a time, but we can optimize I/O
+    temp_files = []  # Track temp files for cleanup
+    
     for idx, ex in enumerate(tqdm(ds, total=local_ds_len, desc=desc)):
         # skip ultra‑short
         if len(ex["audio"]["array"]) < 0.2 * ex["audio"]["sampling_rate"]:
@@ -1102,26 +1138,37 @@ try:
             results_p.append(""); results_r.append(_clean(ex["text"]))
             ser_errors += 1
             continue
+            
+        # Create temporary audio file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             sf.write(tmp.name, ex["audio"]["array"], ex["audio"]["sampling_rate"])
             wav_path = tmp.name
+            temp_files.append(wav_path)
+        
         try:
-            try:
-                _, out = model.generate(
-                    [
-                        {"role": "user", "message_type": "text", "content": "Please transcribe the following english audio:"},
-                        {"role": "user", "message_type": "audio", "content": wav_path},
-                    ],
-                    **SAMPLING,
-                    output_type="text",
-                )
-            except RuntimeError as e:
-                if "expected a non-empty list" in str(e):
-                    failures.append({"index": idx, "reason": "whisper_empty"}); out = ""
-                else:
-                    raise
+            # Ensure we're using the correct GPU device for inference
+            with torch.cuda.device(model.device):
+                try:
+                    _, out = model.generate(
+                        [
+                            {"role": "user", "message_type": "text", "content": "Please transcribe the following english audio:"},
+                            {"role": "user", "message_type": "audio", "content": wav_path},
+                        ],
+                        **SAMPLING,
+                        output_type="text",
+                    )
+                except RuntimeError as e:
+                    if "expected a non-empty list" in str(e):
+                        failures.append({"index": idx, "reason": "whisper_empty"}); out = ""
+                    else:
+                        raise
         finally:
-            os.remove(wav_path)
+            # Clean up temp file immediately after processing
+            try:
+                os.remove(wav_path)
+                temp_files.remove(wav_path)
+            except (OSError, ValueError):
+                pass  # File might already be deleted or not in list
 
         pred, ref = _clean(out), _clean(ex["text"])
         results_p.append(pred); results_r.append(ref)
@@ -1197,6 +1244,25 @@ except KeyboardInterrupt:
         wandb.finish(exit_code=255)
     cleanup_distributed()
     sys.exit(130)
+except Exception as e:
+    print(f"❌ GPU {rank}: Error during inference: {e}")
+    if is_main_process:
+        wandb.finish(exit_code=1)
+    cleanup_distributed()
+    raise
+finally:
+    # Clean up any remaining temp files
+    if 'temp_files' in locals():
+        for temp_file in temp_files:
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+    
+    # Ensure CUDA context is properly cleaned up
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 # ------------------------- FINAL METRICS -----------------------------
 # Save any remaining batch_mistakes to parquet on each GPU

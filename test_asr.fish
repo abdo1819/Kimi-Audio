@@ -121,9 +121,11 @@ echo "                          Default: direct download from OpenSLR (recommend
             echo "NOTES:"
             echo "  • Evaluation runs in background and survives terminal disconnection"
             echo "  • Results are saved incrementally to prevent data loss"
-            echo "  • Multi-GPU mode automatically splits dataset across available GPUs"
-            echo "  • Single W&B run tracks progress from all GPUs"
-            echo "  • Use 'kill <PID>' to stop evaluation early"
+            echo "  • Multi-GPU mode splits dataset across GPUs and runs inference in parallel"
+            echo "  • Each GPU gets its own CUDA_VISIBLE_DEVICES assignment (0, 1, etc.)"
+            echo "  • Single W&B run tracks aggregated progress from all GPUs"
+            echo "  • Individual GPU logs available for debugging: logs/gpu_N_asr_*.log"
+            echo "  • Use 'kill <PID>' to stop individual GPU processes"
             echo ""
             exit 0
     end
@@ -152,20 +154,17 @@ echo "[launcher] 📊 GPUs: Using $NUM_GPUS out of $AVAILABLE_GPUS available"
 echo "[launcher] 📝 Logging to: $LOG_FILE"
 
 if test $USE_MULTI_GPU = true
-    echo "[launcher] 🔥 Multi-GPU mode: Using launch_multi_gpu_asr.py"
+    echo "[launcher] 🔥 Multi-GPU mode: Launching $NUM_GPUS parallel processes"
     
-    # Build command for multi-GPU launcher
-    set LAUNCH_CMD "python" "launch_multi_gpu_asr.py" "--num_gpus" $NUM_GPUS
-    
-    if test $AUTO_MERGE = true
-        set LAUNCH_CMD $LAUNCH_CMD "--auto_merge"
+    # Validate GPU count
+    if test $NUM_GPUS -gt $AVAILABLE_GPUS
+        echo "[launcher] ⚠️  Warning: Requested $NUM_GPUS GPUs but only $AVAILABLE_GPUS available"
+        echo "[launcher] 🔧 Adjusting to use $AVAILABLE_GPUS GPUs"
+        set NUM_GPUS $AVAILABLE_GPUS
     end
     
-    if test $CLEANUP = true
-        set LAUNCH_CMD $LAUNCH_CMD "--cleanup"
-    end
-    
-    # Add all other arguments (excluding our custom ones)
+    # Build base arguments (excluding our custom launcher ones)
+    set BASE_ARGS
     set skip_next false
     for arg in $argv
         if test $skip_next = true
@@ -179,15 +178,80 @@ if test $USE_MULTI_GPU = true
                 # Skip this argument and the next one (its value)
                 set skip_next true
             case --auto_merge --cleanup
-                # Skip these (already handled)
+                # Skip these (launcher-specific arguments)
             case '*'
-                set LAUNCH_CMD $LAUNCH_CMD $arg
+                set BASE_ARGS $BASE_ARGS $arg
         end
     end
     
-    # Launch in background
-    nohup $LAUNCH_CMD > "$LOG_FILE" 2>&1 &
-    set PID $last_pid
+    # Add multi-GPU arguments to base args
+    set BASE_ARGS $BASE_ARGS "--num_gpus" $NUM_GPUS
+    
+    # Store PIDs for process management
+    set GPU_PIDS
+    
+    # Launch each GPU process with separate CUDA_VISIBLE_DEVICES
+    for rank in (seq 0 (math $NUM_GPUS - 1))
+        set gpu_id $rank
+        set rank_log_file "$LOG_DIR/gpu_$rank"_asr_"$TS.log"
+        
+        echo "[launcher] 🚀 Starting GPU $rank (CUDA device $gpu_id)..."
+        
+        # Build command for this specific GPU/rank
+        set GPU_CMD env CUDA_VISIBLE_DEVICES=$gpu_id python test_asr.py $BASE_ARGS --local_rank $rank
+        
+        # Launch in background with separate log file
+        nohup $GPU_CMD > "$rank_log_file" 2>&1 &
+        set gpu_pid $last_pid
+        set GPU_PIDS $GPU_PIDS $gpu_pid
+        
+        echo "[launcher] ✅ GPU $rank started (PID: $gpu_pid, Log: $rank_log_file)"
+        
+        # Small delay to avoid race conditions in distributed setup
+        sleep 2
+    end
+    
+    # Create combined log monitoring
+    echo "[launcher] 📝 Creating combined log file: $LOG_FILE"
+    
+    # Function to merge logs in background
+    begin
+        echo "=== Multi-GPU ASR Evaluation Started at (date) ===" > "$LOG_FILE"
+        echo "GPUs used: $NUM_GPUS" >> "$LOG_FILE"
+        echo "Process PIDs: $GPU_PIDS" >> "$LOG_FILE"
+        echo "Individual logs: $LOG_DIR/gpu_*_asr_$TS.log" >> "$LOG_FILE"
+        echo "===========================================" >> "$LOG_FILE"
+        echo "" >> "$LOG_FILE"
+        
+        # Monitor and merge logs from all GPU processes
+        while true
+            for rank in (seq 0 (math $NUM_GPUS - 1))
+                set rank_log "$LOG_DIR/gpu_$rank"_asr_"$TS.log"
+                if test -f "$rank_log"
+                    echo "--- GPU $rank output ---" >> "$LOG_FILE"
+                    tail -n 10 "$rank_log" 2>/dev/null >> "$LOG_FILE"
+                end
+            end
+            echo "" >> "$LOG_FILE"
+            sleep 30  # Update every 30 seconds
+            
+            # Check if any GPU process is still running
+            set running_processes 0
+            for pid in $GPU_PIDS
+                if ps -p $pid > /dev/null 2>&1
+                    set running_processes (math $running_processes + 1)
+                end
+            end
+            
+            if test $running_processes -eq 0
+                echo "=== All GPU processes completed at (date) ===" >> "$LOG_FILE"
+                break
+            end
+        end
+    end &
+    
+    # Set main PID to first GPU process for compatibility
+    set PID $GPU_PIDS[1]
     
 else
     echo "[launcher] 🔧 Single-GPU mode: Using test_asr.py directly"
@@ -201,27 +265,91 @@ end
 disown $PID
 
 # --- user feedback -------------------------------------------------------------
-echo "[launcher] ✅ Started evaluation (PID: $PID)"
-echo "[launcher] 📁 Results will be saved to 'batch_mistakes_parquet/'"
-
 if test $USE_MULTI_GPU = true
-    echo "[launcher] 🔄 Multi-GPU results will be automatically aggregated"
+    echo "[launcher] ✅ Started multi-GPU evaluation"
+    echo "[launcher] 🔢 GPU PIDs: $GPU_PIDS"
+    echo "[launcher] 📁 Individual logs: $LOG_DIR/gpu_*_asr_$TS.log"
+    echo "[launcher] 📁 Combined log: $LOG_FILE"
+    echo "[launcher] 📁 Results will be saved to 'batch_mistakes_parquet/'"
+    echo "[launcher] 🔄 Multi-GPU results are automatically aggregated during evaluation"
+    
+    # Setup auto-merge functionality if requested
     if test $AUTO_MERGE = true
-        echo "[launcher] 📦 Results will be auto-merged into 'merged_mistakes.parquet'"
+        echo "[launcher] 📦 Auto-merge enabled: Results will be consolidated after completion"
+        
+        # Background process to monitor completion and auto-merge
+        begin
+            # Wait for all GPU processes to complete
+            while true
+                set running_processes 0
+                for pid in $GPU_PIDS
+                    if ps -p $pid > /dev/null 2>&1
+                        set running_processes (math $running_processes + 1)
+                    end
+                end
+                
+                if test $running_processes -eq 0
+                    echo "[launcher] 🎉 All GPU processes completed, starting auto-merge..."
+                    if test -f "merge_batch_mistakes.py"
+                        python merge_batch_mistakes.py
+                        echo "[launcher] 📦 Results merged into 'merged_mistakes.parquet'"
+                        
+                        if test $CLEANUP = true
+                            echo "[launcher] 🧹 Cleaning up individual parquet files..."
+                            rm -f batch_mistakes_parquet/mistakes_batch_*.parquet
+                            echo "[launcher] ✅ Cleanup completed"
+                        end
+                    else
+                        echo "[launcher] ⚠️  merge_batch_mistakes.py not found, skipping auto-merge"
+                    end
+                    break
+                end
+                
+                sleep 30  # Check every 30 seconds
+            end
+        end &
+    else
+        echo "[launcher] 💡 Run 'python merge_batch_mistakes.py' after completion to consolidate results"
     end
 else
+    echo "[launcher] ✅ Started single-GPU evaluation (PID: $PID)"
+    echo "[launcher] 📁 Results will be saved to 'batch_mistakes_parquet/'"
     echo "[launcher] 💡 Run 'python merge_batch_mistakes.py' after completion to consolidate results"
 end
 
 echo ""
 echo "[launcher] 📊 Monitor progress:"
-echo "  tail -f $LOG_FILE"
-echo ""
-echo "[launcher] 🔍 Check status:"
-echo "  ps aux | grep $PID"
-echo ""
-echo "[launcher] 🛑 Stop evaluation:"
-echo "  kill $PID"
+if test $USE_MULTI_GPU = true
+    echo "  # Combined view (updates every 30s)"
+    echo "  tail -f $LOG_FILE"
+    echo ""
+    echo "  # Individual GPU logs (real-time)"
+    for rank in (seq 0 (math $NUM_GPUS - 1))
+        echo "  tail -f $LOG_DIR/gpu_$rank"_asr_"$TS.log  # GPU $rank"
+    end
+    echo ""
+    echo "[launcher] 🔍 Check status:"
+    echo "  # All GPU processes"
+    for pid in $GPU_PIDS
+        echo "  ps aux | grep $pid"
+    end
+    echo ""
+    echo "[launcher] 🛑 Stop evaluation:"
+    echo "  # Stop all GPU processes"
+    for pid in $GPU_PIDS
+        echo "  kill $pid"
+    end
+    echo "  # Or stop all at once"
+    echo "  kill $GPU_PIDS"
+else
+    echo "  tail -f $LOG_FILE"
+    echo ""
+    echo "[launcher] 🔍 Check status:"
+    echo "  ps aux | grep $PID"
+    echo ""
+    echo "[launcher] 🛑 Stop evaluation:"
+    echo "  kill $PID"
+end
 echo ""
 
 # --- Optional: Show current nvidia-smi status ---------------------------------
