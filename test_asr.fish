@@ -139,6 +139,9 @@ else
     set LOG_FILE "$LOG_DIR/single_gpu_asr_$TS.log"
 end
 
+# --- GPU availability check ---------------------------------------------------
+set AVAILABLE_GPUS (check_gpu_availability)
+
 # --- Launch evaluation script --------------------------------------------------
 echo "[launcher] 🚀 Starting ASR evaluation..."
 echo "[launcher] 📊 GPUs: Using $NUM_GPUS out of $AVAILABLE_GPUS available"
