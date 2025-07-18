@@ -283,7 +283,8 @@ def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+    # When using CUDA_VISIBLE_DEVICES, the visible GPU is always device 0
+    torch.cuda.set_device(0)
 
 def cleanup_distributed():
     """Clean up distributed training"""
