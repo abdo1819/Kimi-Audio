@@ -749,166 +749,31 @@ parser.add_argument(
     help="Use HuggingFace automatic download for LibriSpeech instead of direct download "
          "(may fail for large datasets due to 30GB+ size)",
 )
-# Multi-GPU support
-parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (1 or 2)")
-parser.add_argument("--local_rank", type=int, default=0, help="Local rank for distributed processing")
-args = parser.parse_args()
+# Multi-GPU support - simplified interface
+parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use for parallel inference")
 
-# -------------------------- MULTI-GPU SETUP --------------------------
-def setup_distributed(rank, world_size):
-    """Initialize distributed training"""
+def main_worker(rank, world_size, args):
+    """Main worker function for distributed processing"""
+    # Set up distributed environment
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    # When using CUDA_VISIBLE_DEVICES, the visible GPU is always device 0
-    torch.cuda.set_device(0)
-
-def cleanup_distributed():
-    """Clean up distributed training"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-# Set up multi-GPU if requested
-world_size = args.num_gpus
-rank = args.local_rank
-is_distributed = world_size > 1
-
-if is_distributed:
-    setup_distributed(rank, world_size)
-    device = torch.cuda.current_device()
-    visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', 'all')
-    print(f"🔧 Initialized process {rank}/{world_size} on GPU {device} (CUDA_VISIBLE_DEVICES: {visible_devices})")
-else:
-    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-    print(f"🔧 Using single GPU: {device}")
-
-# Only rank 0 handles W&B and main coordination
-is_main_process = rank == 0
-
-# Update LibriSpeech registry based on command line argument
-if args.librispeech_use_hf:
-    REGISTRY["librispeech"] = dict(
-        hf="librispeech_asr",
-        subset_parser=_parse_librispeech_subset,
-        audio="audio",
-        text="text",
-        def_subset="test-clean",
-        sr=16_000,
-    )
-    if is_main_process:
-        print("🔄 Using HuggingFace automatic download for LibriSpeech (may be slow/fail for large datasets)")
-else:
-    if is_main_process:
-        cache_dir = get_librispeech_cache_dir()
-        print(f"📁 Using direct LibriSpeech download (cached to: {cache_dir})")
-
-# -------------------------- W&B RESUME -------------------------------
-RESUME_FILE = Path(".wandb_run_id")
-prev_id = RESUME_FILE.read_text().strip() if RESUME_FILE.exists() else None
-
-# -------------------------- PARQUET SETUP ----------------------------
-# Create output directory for parquet files
-PARQUET_DIR = Path("batch_mistakes_parquet")
-PARQUET_DIR.mkdir(exist_ok=True)
-batch_counter = 0
-
-def save_batch_mistakes_to_parquet(batch_mistakes, batch_id, run_id, rank=0):
-    """Save batch mistakes to a parquet file"""
-    if not batch_mistakes:
-        return None
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(rank)
     
-    df = pd.DataFrame(batch_mistakes)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"mistakes_batch_{batch_id:04d}_{timestamp}_{run_id[:8]}_rank{rank}.parquet"
-    filepath = PARQUET_DIR / filename
-    df.to_parquet(filepath, index=False)
-    return filepath
-
-# W&B initialization - only on main process
-run = None
-if is_main_process:
-    run = wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_run_name,
-        id=prev_id,
-        resume="allow",
-        config={**vars(args), "model": "moonshotai/Kimi-Audio-7B-Instruct"},
-    )
-    if prev_id is None:
-        RESUME_FILE.write_text(run.id)
-    print(
-        f"\nResume with: WANDB_RUN_ID={run.id} WANDB_RESUME=allow python "
-        + " ".join(map(shlex.quote, sys.argv))
-        + "\n"
-    )
-else:
-    # Non-main processes create a dummy run object for compatibility
-    class DummyRun:
-        def __init__(self):
-            self.id = "dummy_run"
-        def log(self, *args, **kwargs):
-            pass
-        def finish(self, *args, **kwargs):
-            pass
-    run = DummyRun()
-
-# ---------------------------- MODEL ----------------------------------
-class MultiGPUKimiAudio:
-    """Wrapper for multi-GPU KimiAudio inference with proper CUDA device assignment"""
-    def __init__(self, model_path, load_detokenizer=True, rank=0, world_size=1):
-        self.rank = rank
-        self.world_size = world_size
-        
-        # Set the specific CUDA device for this process
-        if torch.cuda.is_available():
-            # When using CUDA_VISIBLE_DEVICES, visible devices are renumbered starting from 0
-            # So we always use device 0 for each process
-            device = torch.device('cuda:0')
-            torch.cuda.set_device(device)
-            print(f"🔧 GPU {rank}: Using CUDA device {device}")
-        else:
-            device = torch.device('cpu')
-            print(f"⚠️  GPU {rank}: CUDA not available, using CPU")
-        
-        # Initialize model on the specific device
-        self.model = KimiAudio(model_path=model_path, load_detokenizer=load_detokenizer)
-        
-        # Ensure model is on the correct device
-        if hasattr(self.model, 'model') and hasattr(self.model.model, 'to'):
-            self.model.model = self.model.model.to(device)
-        
-        self.device = device
-        
-    def generate(self, chats, **kwargs):
-        """Generate with the model - ensures proper device placement"""
-        # Ensure any tensors are on the correct device before inference
-        with torch.cuda.device(self.device):
-            return self.model.generate(chats, **kwargs)
-
-# Initialize model
-if is_main_process:
-    print(f"🤖 Loading KimiAudio model on {world_size} GPU(s)...")
-elif rank == 1:
-    print(f"🤖 GPU {rank}: Loading KimiAudio model...")
-
-model = MultiGPUKimiAudio(
-    model_path="moonshotai/Kimi-Audio-7B-Instruct", 
-    load_detokenizer=True,
-    rank=rank,
-    world_size=world_size
-)
-
-SAMPLING = dict(
-    audio_temperature=0.8,
-    audio_top_k=10,
-    text_temperature=0.0,
-    text_top_k=5,
-    audio_repetition_penalty=1.0,
-    audio_repetition_window_size=64,
-    text_repetition_penalty=1.0,
-    text_repetition_window_size=16,
-)
-
+    # Initialize distributed processing
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(0)  # Always use device 0 since CUDA_VISIBLE_DEVICES is set
+    
+    is_main_process = rank == 0
+    
+    # Store original args for this worker
+    args.local_rank = rank
+    args.world_size = world_size
+    
+    # Run the main evaluation logic
+    run_evaluation(args, rank, world_size, is_main_process)
+    
+    # Clean up
+    dist.destroy_process_group()
 
 # -------------------------- LOADERS ----------------------------------
 
@@ -1022,7 +887,7 @@ def load_corpus(key: str, subset: Optional[str] = None, config_override: Optiona
             subset_dir = download_notsofar_transcripts(
                 split=subset,
                 dest_root=cache_root,
-                version=args.notsofar_version,
+                version=getattr(args, 'notsofar_version', None),
             )
             ds = _attach_notsofar_transcripts(ds, subset_dir)
         else:
@@ -1101,267 +966,411 @@ def _diff(r: str, h: str) -> str:
             out += [f"{Fore.YELLOW}{x}{Style.RESET_ALL}" for x in w[j1:j2]]
     return " ".join(out)
 
-# --------------------------- LOAD DATA -------------------------------
-if is_main_process:
-    print("📊 Loading dataset…")
-ds, ds_len = load_corpus(
-    args.dataset,
-    args.subset,
-    args.config,
-    streaming=args.streaming,
-    max_samples=args.max_samples,
-)
-
-# Split dataset across GPUs
-if is_distributed and ds_len:
-    # Calculate samples per GPU
-    samples_per_gpu = ds_len // world_size
-    start_idx = rank * samples_per_gpu
-    end_idx = start_idx + samples_per_gpu if rank < world_size - 1 else ds_len
-    
-    if hasattr(ds, 'select'):
-        # For in-memory datasets
-        ds = ds.select(range(start_idx, end_idx))
-        local_ds_len = end_idx - start_idx
+def run_evaluation(args, rank, world_size, is_main_process):
+    """Main evaluation logic extracted into a function"""
+    # Update LibriSpeech registry based on command line argument
+    if args.librispeech_use_hf:
+        REGISTRY["librispeech"] = dict(
+            hf="librispeech_asr",
+            subset_parser=_parse_librispeech_subset,
+            audio="audio",
+            text="text",
+            def_subset="test-clean",
+            sr=16_000,
+        )
+        if is_main_process:
+            print("🔄 Using HuggingFace automatic download for LibriSpeech (may be slow/fail for large datasets)")
     else:
-        # For streaming datasets
-        ds = ds.skip(start_idx).take(end_idx - start_idx)
-        local_ds_len = end_idx - start_idx
-    
-    if is_main_process:
-        print(f"📊 Dataset split across {world_size} GPUs:")
-        for i in range(world_size):
-            gpu_start = i * samples_per_gpu
-            gpu_end = gpu_start + samples_per_gpu if i < world_size - 1 else ds_len
-            print(f"   GPU {i}: samples {gpu_start:,} - {gpu_end:,} ({gpu_end-gpu_start:,} samples)")
-else:
-    local_ds_len = ds_len
+        if is_main_process:
+            cache_dir = get_librispeech_cache_dir()
+            print(f"📁 Using direct LibriSpeech download (cached to: {cache_dir})")
 
-if is_main_process:
-    print(f"📊 Dataset ready (total≈{ds_len:,}, local≈{local_ds_len:,}).")
+    # -------------------------- W&B RESUME -------------------------------
+    RESUME_FILE = Path(".wandb_run_id")
+    prev_id = RESUME_FILE.read_text().strip() if RESUME_FILE.exists() else None
 
-# ----------------------- MAIN EVAL LOOP ------------------------------
-results_p, results_r = [], []
-all_mistakes, batch_mistakes, failures = [], [], []
-ser_errors = 0  # sentence error count
+    # -------------------------- PARQUET SETUP ----------------------------
+    # Create output directory for parquet files
+    PARQUET_DIR = Path("batch_mistakes_parquet")
+    PARQUET_DIR.mkdir(exist_ok=True)
+    batch_counter = 0
 
-# Global counters for distributed processing
-global_idx_offset = rank * (ds_len // world_size) if is_distributed else 0
-
-# Synchronize all processes before starting inference
-if is_distributed:
-    print(f"🔄 GPU {rank}: Waiting for all GPUs to be ready...")
-    dist.barrier()
-    print(f"✅ GPU {rank}: All GPUs ready, starting inference...")
-
-try:
-    desc = f"Transcribing (GPU {rank})" if is_distributed else "Transcribing"
-    
-    # Batch processing for better GPU utilization
-    batch_size = 1  # KimiAudio processes one sample at a time, but we can optimize I/O
-    temp_files = []  # Track temp files for cleanup
-    
-    for idx, ex in enumerate(tqdm(ds, total=local_ds_len, desc=desc)):
-        # skip ultra‑short
-        if len(ex["audio"]["array"]) < 0.2 * ex["audio"]["sampling_rate"]:
-            failures.append({"index": idx, "reason": "too_short"})
-            results_p.append(""); results_r.append(_clean(ex["text"]))
-            ser_errors += 1
-            continue
-            
-        # Create temporary audio file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            sf.write(tmp.name, ex["audio"]["array"], ex["audio"]["sampling_rate"])
-            wav_path = tmp.name
-            temp_files.append(wav_path)
+    def save_batch_mistakes_to_parquet(batch_mistakes, batch_id, run_id, rank=0):
+        """Save batch mistakes to a parquet file"""
+        if not batch_mistakes:
+            return None
         
-        try:
-            # Ensure we're using the correct GPU device for inference
-            with torch.cuda.device(model.device):
-                try:
-                    _, out = model.generate(
-                        [
-                            {"role": "user", "message_type": "text", "content": "Please transcribe the following english audio:"},
-                            {"role": "user", "message_type": "audio", "content": wav_path},
-                        ],
-                        **SAMPLING,
-                        output_type="text",
-                    )
-                except RuntimeError as e:
-                    if "expected a non-empty list" in str(e):
-                        failures.append({"index": idx, "reason": "whisper_empty"}); out = ""
-                    else:
-                        raise
-        finally:
-            # Clean up temp file immediately after processing
-            try:
-                os.remove(wav_path)
-                temp_files.remove(wav_path)
-            except (OSError, ValueError):
-                pass  # File might already be deleted or not in list
+        df = pd.DataFrame(batch_mistakes)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"mistakes_batch_{batch_id:04d}_{timestamp}_{run_id[:8]}_rank{rank}.parquet"
+        filepath = PARQUET_DIR / filename
+        df.to_parquet(filepath, index=False)
+        return filepath
 
-        pred, ref = _clean(out), _clean(ex["text"])
-        results_p.append(pred); results_r.append(ref)
-        sent_err = int(pred != ref); ser_errors += sent_err
-
-        if pred != ref:
-            entry = dict(
-                index=idx + global_idx_offset,  # Use global index
-                reference=ref,
-                prediction=pred,
-                diff=_diff(ref, pred),
-                sample_wer=wer_metric.compute(predictions=[pred], references=[ref]),
-                sample_cer=cer_metric.compute(predictions=[pred], references=[ref]),
-                gpu_rank=rank,  # Track which GPU processed this
-            )
-            all_mistakes.append(entry); batch_mistakes.append(entry)
-
-        # ---- periodic logging ----
-        if (idx + 1) % 250 == 0:
-            # Save parquet files on each GPU
-            if batch_mistakes:
-                parquet_file = save_batch_mistakes_to_parquet(batch_mistakes, batch_counter, run.id, rank)
-                if parquet_file:
-                    print(f"💾 GPU {rank}: Saved {len(batch_mistakes)} mistakes to {parquet_file}")
-                batch_mistakes = []
-                batch_counter += 1
-            
-            # Only main process handles W&B logging and metric aggregation
-            if is_main_process:
-                # Gather metrics from all GPUs if distributed
-                if is_distributed:
-                    # Collect predictions and references from all GPUs
-                    all_predictions = [None] * world_size
-                    all_references = [None] * world_size
-                    all_errors = [None] * world_size
-                    all_failures = [None] * world_size
-                    
-                    dist.all_gather_object(all_predictions, results_p)
-                    dist.all_gather_object(all_references, results_r)
-                    dist.all_gather_object(all_errors, ser_errors)
-                    dist.all_gather_object(all_failures, len(failures))
-                    
-                    # Flatten lists
-                    global_predictions = [item for sublist in all_predictions for item in sublist]
-                    global_references = [item for sublist in all_references for item in sublist]
-                    global_ser_errors = sum(all_errors)
-                    global_failures = sum(all_failures)
-                    global_samples = len(global_predictions)
-                else:
-                    global_predictions = results_p
-                    global_references = results_r
-                    global_ser_errors = ser_errors
-                    global_failures = len(failures)
-                    global_samples = idx + 1
-                
-                if global_predictions and global_references:
-                    running_wer = wer_metric.compute(predictions=global_predictions, references=global_references)
-                    running_cer = cer_metric.compute(predictions=global_predictions, references=global_references)
-                    running_ser = global_ser_errors / global_samples
-                    
-                    metrics = {
-                        "running_wer": running_wer,
-                        "running_cer": running_cer,
-                        "running_ser": running_ser,
-                        "seen_samples": global_samples,
-                        "failed": global_failures,
-                        "num_gpus": world_size,
-                    }
-                    wandb.log(metrics)
-except KeyboardInterrupt:
-    print(f"🛑 GPU {rank}: Interrupted – resume later!")
+    # W&B initialization - only on main process
+    run = None
     if is_main_process:
-        wandb.finish(exit_code=255)
-    cleanup_distributed()
-    sys.exit(130)
-except Exception as e:
-    print(f"❌ GPU {rank}: Error during inference: {e}")
-    if is_main_process:
-        wandb.finish(exit_code=1)
-    cleanup_distributed()
-    raise
-finally:
-    # Clean up any remaining temp files
-    if 'temp_files' in locals():
-        for temp_file in temp_files:
-            try:
-                os.remove(temp_file)
-            except OSError:
+        run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            id=prev_id,
+            resume="allow",
+            config={**vars(args), "model": "moonshotai/Kimi-Audio-7B-Instruct"},
+        )
+        if prev_id is None:
+            RESUME_FILE.write_text(run.id)
+        print(
+            f"\nResume with: WANDB_RUN_ID={run.id} WANDB_RESUME=allow python "
+            + " ".join(map(shlex.quote, sys.argv))
+            + "\n"
+        )
+    else:
+        # Non-main processes create a dummy run object for compatibility
+        class DummyRun:
+            def __init__(self):
+                self.id = "dummy_run"
+            def log(self, *args, **kwargs):
                 pass
-    
-    # Ensure CUDA context is properly cleaned up
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+            def finish(self, *args, **kwargs):
+                pass
+        run = DummyRun()
 
-# ------------------------- FINAL METRICS -----------------------------
-# Save any remaining batch_mistakes to parquet on each GPU
-if batch_mistakes:
-    parquet_file = save_batch_mistakes_to_parquet(batch_mistakes, batch_counter, run.id, rank)
-    if parquet_file:
-        print(f"💾 GPU {rank}: Saved final {len(batch_mistakes)} mistakes to {parquet_file}")
+    # ---------------------------- MODEL ----------------------------------
+    class MultiGPUKimiAudio:
+        """Wrapper for multi-GPU KimiAudio inference with proper CUDA device assignment"""
+        def __init__(self, model_path, load_detokenizer=True, rank=0, world_size=1):
+            self.rank = rank
+            self.world_size = world_size
+            
+            # Set the specific CUDA device for this process
+            if torch.cuda.is_available():
+                # When using CUDA_VISIBLE_DEVICES, visible devices are renumbered starting from 0
+                # So we always use device 0 for each process
+                device = torch.device('cuda:0')
+                torch.cuda.set_device(device)
+                print(f"🔧 GPU {rank}: Using CUDA device {device}")
+            else:
+                device = torch.device('cpu')
+                print(f"⚠️  GPU {rank}: CUDA not available, using CPU")
+            
+            # Initialize model on the specific device
+            self.model = KimiAudio(model_path=model_path, load_detokenizer=load_detokenizer)
+            
+            # Ensure model is on the correct device
+            if hasattr(self.model, 'model') and hasattr(self.model.model, 'to'):
+                self.model.model = self.model.model.to(device)
+            
+            self.device = device
+            
+        def generate(self, chats, **kwargs):
+            """Generate with the model - ensures proper device placement"""
+            # Ensure any tensors are on the correct device before inference
+            with torch.cuda.device(self.device):
+                return self.model.generate(chats, **kwargs)
 
-# Aggregate final results from all GPUs
-if is_main_process:
-    if is_distributed:
-        # Gather all results from all GPUs
-        all_predictions = [None] * world_size
-        all_references = [None] * world_size
-        all_errors = [None] * world_size
-        all_failures = [None] * world_size
-        all_mistakes_lists = [None] * world_size
+    # Initialize model
+    if is_main_process:
+        print(f"🤖 Loading KimiAudio model on {world_size} GPU(s)...")
+    elif rank == 1:
+        print(f"🤖 GPU {rank}: Loading KimiAudio model...")
+
+    model = MultiGPUKimiAudio(
+        model_path="moonshotai/Kimi-Audio-7B-Instruct", 
+        load_detokenizer=True,
+        rank=rank,
+        world_size=world_size
+    )
+
+    SAMPLING = dict(
+        audio_temperature=0.8,
+        audio_top_k=10,
+        text_temperature=0.0,
+        text_top_k=5,
+        audio_repetition_penalty=1.0,
+        audio_repetition_window_size=64,
+        text_repetition_penalty=1.0,
+        text_repetition_window_size=16,
+    )
+
+    # --------------------------- LOAD DATA -------------------------------
+    if is_main_process:
+        print("📊 Loading dataset…")
+    ds, ds_len = load_corpus(
+        args.dataset,
+        args.subset,
+        args.config,
+        streaming=args.streaming,
+        max_samples=args.max_samples,
+    )
+
+    # Split dataset across GPUs
+    is_distributed = world_size > 1
+    if is_distributed and ds_len:
+        # Calculate samples per GPU
+        samples_per_gpu = ds_len // world_size
+        start_idx = rank * samples_per_gpu
+        end_idx = start_idx + samples_per_gpu if rank < world_size - 1 else ds_len
         
-        dist.all_gather_object(all_predictions, results_p)
-        dist.all_gather_object(all_references, results_r)
-        dist.all_gather_object(all_errors, ser_errors)
-        dist.all_gather_object(all_failures, len(failures))
-        dist.all_gather_object(all_mistakes_lists, all_mistakes)
+        if hasattr(ds, 'select'):
+            # For in-memory datasets
+            ds = ds.select(range(start_idx, end_idx))
+            local_ds_len = end_idx - start_idx
+        else:
+            # For streaming datasets
+            ds = ds.skip(start_idx).take(end_idx - start_idx)
+            local_ds_len = end_idx - start_idx
         
-        # Flatten and combine all results
-        final_predictions = [item for sublist in all_predictions for item in sublist]
-        final_references = [item for sublist in all_references for item in sublist]
-        final_ser_errors = sum(all_errors)
-        final_failures = sum(all_failures)
-        final_all_mistakes = [item for sublist in all_mistakes_lists for item in sublist]
+        if is_main_process:
+            print(f"📊 Dataset split across {world_size} GPUs:")
+            for i in range(world_size):
+                gpu_start = i * samples_per_gpu
+                gpu_end = gpu_start + samples_per_gpu if i < world_size - 1 else ds_len
+                print(f"   GPU {i}: samples {gpu_start:,} - {gpu_end:,} ({gpu_end-gpu_start:,} samples)")
     else:
-        final_predictions = results_p
-        final_references = results_r
-        final_ser_errors = ser_errors
-        final_failures = len(failures)
-        final_all_mistakes = all_mistakes
-    
-    if final_predictions and final_references:
-        final_wer = wer_metric.compute(predictions=final_predictions, references=final_references)
-        final_cer = cer_metric.compute(predictions=final_predictions, references=final_references)
-        final_ser = final_ser_errors / len(final_predictions)
-        
-        wandb.log({
-            "final_wer": final_wer, 
-            "final_cer": final_cer, 
-            "final_ser": final_ser, 
-            "failed": final_failures,
-            "total_samples": len(final_predictions),
-            "num_gpus": world_size
-        })
-        
-        print(f"🎯 Final Results:")
-        print(f"   WER: {final_wer:.4f}")
-        print(f"   CER: {final_cer:.4f}")
-        print(f"   SER: {final_ser:.4f}")
-        print(f"   Failed: {final_failures}")
-        print(f"   Total samples: {len(final_predictions):,}")
-        print(f"   GPUs used: {world_size}")
-        
-        # Upload consolidated error table
-        if final_all_mistakes:
-            tbl = wandb.Table(columns=list(final_all_mistakes[0].keys()))
-            for m in final_all_mistakes:
-                tbl.add_data(*m.values())
-            wandb.log({"error_table": tbl})
-    
-    wandb.finish()
-    if RESUME_FILE.exists():
-        RESUME_FILE.unlink(missing_ok=True)
+        local_ds_len = ds_len
 
-# Clean up distributed training
-cleanup_distributed()
+    if is_main_process:
+        print(f"📊 Dataset ready (total≈{ds_len:,}, local≈{local_ds_len:,}).")
+
+    # ----------------------- MAIN EVAL LOOP ------------------------------
+    results_p, results_r = [], []
+    all_mistakes, batch_mistakes, failures = [], [], []
+    ser_errors = 0  # sentence error count
+
+    # Global counters for distributed processing
+    global_idx_offset = rank * (ds_len // world_size) if is_distributed else 0
+
+    # Synchronize all processes before starting inference
+    if is_distributed:
+        print(f"🔄 GPU {rank}: Waiting for all GPUs to be ready...")
+        dist.barrier()
+        print(f"✅ GPU {rank}: All GPUs ready, starting inference...")
+
+    try:
+        desc = f"Transcribing (GPU {rank})" if is_distributed else "Transcribing"
+        
+        # Batch processing for better GPU utilization
+        batch_size = 1  # KimiAudio processes one sample at a time, but we can optimize I/O
+        temp_files = []  # Track temp files for cleanup
+        
+        for idx, ex in enumerate(tqdm(ds, total=local_ds_len, desc=desc)):
+            # skip ultra‑short
+            if len(ex["audio"]["array"]) < 0.2 * ex["audio"]["sampling_rate"]:
+                failures.append({"index": idx, "reason": "too_short"})
+                results_p.append(""); results_r.append(_clean(ex["text"]))
+                ser_errors += 1
+                continue
+                
+            # Create temporary audio file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                sf.write(tmp.name, ex["audio"]["array"], ex["audio"]["sampling_rate"])
+                wav_path = tmp.name
+                temp_files.append(wav_path)
+            
+            try:
+                # Ensure we're using the correct GPU device for inference
+                with torch.cuda.device(model.device):
+                    try:
+                        _, out = model.generate(
+                            [
+                                {"role": "user", "message_type": "text", "content": "Please transcribe the following english audio:"},
+                                {"role": "user", "message_type": "audio", "content": wav_path},
+                            ],
+                            **SAMPLING,
+                            output_type="text",
+                        )
+                    except RuntimeError as e:
+                        if "expected a non-empty list" in str(e):
+                            failures.append({"index": idx, "reason": "whisper_empty"}); out = ""
+                        else:
+                            raise
+            finally:
+                # Clean up temp file immediately after processing
+                try:
+                    os.remove(wav_path)
+                    temp_files.remove(wav_path)
+                except (OSError, ValueError):
+                    pass  # File might already be deleted or not in list
+
+            pred, ref = _clean(out), _clean(ex["text"])
+            results_p.append(pred); results_r.append(ref)
+            sent_err = int(pred != ref); ser_errors += sent_err
+
+            if pred != ref:
+                entry = dict(
+                    index=idx + global_idx_offset,  # Use global index
+                    reference=ref,
+                    prediction=pred,
+                    diff=_diff(ref, pred),
+                    sample_wer=wer_metric.compute(predictions=[pred], references=[ref]),
+                    sample_cer=cer_metric.compute(predictions=[pred], references=[ref]),
+                    gpu_rank=rank,  # Track which GPU processed this
+                )
+                all_mistakes.append(entry); batch_mistakes.append(entry)
+
+            # ---- periodic logging ----
+            if (idx + 1) % 250 == 0:
+                # Save parquet files on each GPU
+                if batch_mistakes:
+                    parquet_file = save_batch_mistakes_to_parquet(batch_mistakes, batch_counter, run.id, rank)
+                    if parquet_file:
+                        print(f"💾 GPU {rank}: Saved {len(batch_mistakes)} mistakes to {parquet_file}")
+                    batch_mistakes = []
+                    batch_counter += 1
+                
+                # Only main process handles W&B logging and metric aggregation
+                if is_main_process:
+                    # Gather metrics from all GPUs if distributed
+                    if is_distributed:
+                        # Collect predictions and references from all GPUs
+                        all_predictions = [None] * world_size
+                        all_references = [None] * world_size
+                        all_errors = [None] * world_size
+                        all_failures = [None] * world_size
+                        
+                        dist.all_gather_object(all_predictions, results_p)
+                        dist.all_gather_object(all_references, results_r)
+                        dist.all_gather_object(all_errors, ser_errors)
+                        dist.all_gather_object(all_failures, len(failures))
+                        
+                        # Flatten lists
+                        global_predictions = [item for sublist in all_predictions for item in sublist]
+                        global_references = [item for sublist in all_references for item in sublist]
+                        global_ser_errors = sum(all_errors)
+                        global_failures = sum(all_failures)
+                        global_samples = len(global_predictions)
+                    else:
+                        global_predictions = results_p
+                        global_references = results_r
+                        global_ser_errors = ser_errors
+                        global_failures = len(failures)
+                        global_samples = idx + 1
+                    
+                    if global_predictions and global_references:
+                        running_wer = wer_metric.compute(predictions=global_predictions, references=global_references)
+                        running_cer = cer_metric.compute(predictions=global_predictions, references=global_references)
+                        running_ser = global_ser_errors / global_samples
+                        
+                        metrics = {
+                            "running_wer": running_wer,
+                            "running_cer": running_cer,
+                            "running_ser": running_ser,
+                            "seen_samples": global_samples,
+                            "failed": global_failures,
+                            "num_gpus": world_size,
+                        }
+                        wandb.log(metrics)
+    except KeyboardInterrupt:
+        print(f"🛑 GPU {rank}: Interrupted – resume later!")
+        if is_main_process:
+            wandb.finish(exit_code=255)
+        sys.exit(130)
+    except Exception as e:
+        print(f"❌ GPU {rank}: Error during inference: {e}")
+        if is_main_process:
+            wandb.finish(exit_code=1)
+        raise
+    finally:
+        # Clean up any remaining temp files
+        if 'temp_files' in locals():
+            for temp_file in temp_files:
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
+        
+        # Ensure CUDA context is properly cleaned up
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    # ------------------------- FINAL METRICS -----------------------------
+    # Save any remaining batch_mistakes to parquet on each GPU
+    if batch_mistakes:
+        parquet_file = save_batch_mistakes_to_parquet(batch_mistakes, batch_counter, run.id, rank)
+        if parquet_file:
+            print(f"💾 GPU {rank}: Saved final {len(batch_mistakes)} mistakes to {parquet_file}")
+
+    # Aggregate final results from all GPUs
+    if is_main_process:
+        if is_distributed:
+            # Gather all results from all GPUs
+            all_predictions = [None] * world_size
+            all_references = [None] * world_size
+            all_errors = [None] * world_size
+            all_failures = [None] * world_size
+            all_mistakes_lists = [None] * world_size
+            
+            dist.all_gather_object(all_predictions, results_p)
+            dist.all_gather_object(all_references, results_r)
+            dist.all_gather_object(all_errors, ser_errors)
+            dist.all_gather_object(all_failures, len(failures))
+            dist.all_gather_object(all_mistakes_lists, all_mistakes)
+            
+            # Flatten and combine all results
+            final_predictions = [item for sublist in all_predictions for item in sublist]
+            final_references = [item for sublist in all_references for item in sublist]
+            final_ser_errors = sum(all_errors)
+            final_failures = sum(all_failures)
+            final_all_mistakes = [item for sublist in all_mistakes_lists for item in sublist]
+        else:
+            final_predictions = results_p
+            final_references = results_r
+            final_ser_errors = ser_errors
+            final_failures = len(failures)
+            final_all_mistakes = all_mistakes
+        
+        if final_predictions and final_references:
+            final_wer = wer_metric.compute(predictions=final_predictions, references=final_references)
+            final_cer = cer_metric.compute(predictions=final_predictions, references=final_references)
+            final_ser = final_ser_errors / len(final_predictions)
+            
+            wandb.log({
+                "final_wer": final_wer, 
+                "final_cer": final_cer, 
+                "final_ser": final_ser, 
+                "failed": final_failures,
+                "total_samples": len(final_predictions),
+                "num_gpus": world_size
+            })
+            
+            print(f"🎯 Final Results:")
+            print(f"   WER: {final_wer:.4f}")
+            print(f"   CER: {final_cer:.4f}")
+            print(f"   SER: {final_ser:.4f}")
+            print(f"   Failed: {final_failures}")
+            print(f"   Total samples: {len(final_predictions):,}")
+            print(f"   GPUs used: {world_size}")
+            
+            # Upload consolidated error table
+            if final_all_mistakes:
+                tbl = wandb.Table(columns=list(final_all_mistakes[0].keys()))
+                for m in final_all_mistakes:
+                    tbl.add_data(*m.values())
+                wandb.log({"error_table": tbl})
+        
+        wandb.finish()
+        if RESUME_FILE.exists():
+            RESUME_FILE.unlink(missing_ok=True)
+
+def main():
+    """Main entry point"""
+    args = parser.parse_args()
+    
+    if args.num_gpus == 1:
+        # Single GPU - run directly
+        print(f"🔧 Running on single GPU")
+        run_evaluation(args, rank=0, world_size=1, is_main_process=True)
+    else:
+        # Multi-GPU - spawn workers
+        available_gpus = torch.cuda.device_count()
+        if args.num_gpus > available_gpus:
+            print(f"⚠️  Warning: Requested {args.num_gpus} GPUs but only {available_gpus} available")
+            print(f"🔧 Adjusting to use {available_gpus} GPUs")
+            args.num_gpus = available_gpus
+        
+        print(f"🔧 Starting multi-GPU evaluation with {args.num_gpus} GPUs")
+        mp.spawn(main_worker, args=(args.num_gpus, args), nprocs=args.num_gpus, join=True)
+
+if __name__ == "__main__":
+    main()
