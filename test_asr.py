@@ -103,20 +103,6 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     cache_root.mkdir(parents=True, exist_ok=True)
     subset_dir = cache_root / "LibriSpeech" / subset
     
-    # Check if already downloaded and extracted with proper validation
-    if subset_dir.exists() and any(subset_dir.glob("*/*/*.flac")):
-        # Additional check: ensure we have both audio files and transcript files
-        has_audio = len(list(subset_dir.glob("*/*/*.flac"))) > 0
-        has_transcripts = len(list(subset_dir.glob("*/*.trans.txt"))) > 0
-        if has_audio and has_transcripts:
-            print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
-            return subset_dir
-        else:
-            print(f"⚠️  LibriSpeech {subset} partially downloaded, re-extracting...")
-    
-    url = LIBRISPEECH_URLS[subset]
-    tar_file = cache_root / f"{subset}.tar.gz"
-    
     # Subset size information for user awareness
     SUBSET_SIZES = {
         "test-clean": "~346MB",
@@ -129,6 +115,50 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     }
     
     size_info = SUBSET_SIZES.get(subset, "unknown size")
+    needs_download = False
+    
+    # Check if already downloaded and extracted with proper validation
+    if subset_dir.exists() and any(subset_dir.glob("*/*/*.flac")):
+        # Additional check: ensure we have both audio files and transcript files
+        has_audio = len(list(subset_dir.glob("*/*/*.flac"))) > 0
+        has_transcripts = len(list(subset_dir.glob("*/*.trans.txt"))) > 0
+        if has_audio and has_transcripts:
+            print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
+            return subset_dir
+        else:
+            print(f"⚠️  LibriSpeech {subset} partially downloaded or corrupted")
+            needs_download = True
+    else:
+        print(f"📁 LibriSpeech {subset} not found in cache")
+        needs_download = True
+    
+    # Ask for confirmation before downloading
+    if needs_download:
+        print(f"\n🔍 LibriSpeech {subset} download required:")
+        print(f"   📊 Size: {size_info}")
+        print(f"   📂 Location: {subset_dir}")
+        print(f"   🌐 Source: OpenSLR (https://openslr.org/12/)")
+        
+        # Check for automated environments or add confirmation
+        if os.environ.get("LIBRISPEECH_AUTO_DOWNLOAD", "").lower() in ("yes", "true", "1"):
+            print(f"   🤖 LIBRISPEECH_AUTO_DOWNLOAD=true, proceeding automatically...")
+            confirm = True
+        else:
+            try:
+                response = input(f"\n❓ Download LibriSpeech {subset} ({size_info})? [y/N]: ").strip().lower()
+                confirm = response in ('y', 'yes')
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n❌ Download cancelled by user")
+                raise KeyboardInterrupt("LibriSpeech download cancelled")
+        
+        if not confirm:
+            print(f"❌ Download cancelled. To auto-confirm downloads, set: export LIBRISPEECH_AUTO_DOWNLOAD=true")
+            raise RuntimeError(f"LibriSpeech {subset} download required but cancelled by user")
+        
+        print(f"✅ Proceeding with download...")
+    
+    url = LIBRISPEECH_URLS[subset]
+    tar_file = cache_root / f"{subset}.tar.gz"
     
     # Check if tar file already exists
     if tar_file.exists():
