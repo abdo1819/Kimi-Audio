@@ -104,9 +104,9 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     subset_dir = cache_root / "LibriSpeech" / subset
     
     # Check if already downloaded and extracted with proper validation
-    if subset_dir.exists() and any(subset_dir.glob("*/*.flac")):
+    if subset_dir.exists() and any(subset_dir.glob("*/*/*.flac")):
         # Additional check: ensure we have both audio files and transcript files
-        has_audio = len(list(subset_dir.glob("*/*.flac"))) > 0
+        has_audio = len(list(subset_dir.glob("*/*/*.flac"))) > 0
         has_transcripts = len(list(subset_dir.glob("*/*.trans.txt"))) > 0
         if has_audio and has_transcripts:
             print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
@@ -265,6 +265,7 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
                     print(f"   ⏰ Archive integrity test timed out (very large archive)")
                 except Exception as e:
                     print(f"   ⚠️ Could not test archive integrity: {e}")
+                    # Don't fail here, continue with extraction attempt
                 
                 # Check disk space
                 try:
@@ -302,14 +303,59 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
         elapsed_time = time.time() - start_time
         print(f"\n✅ Extraction completed in {elapsed_time:.1f}s: {subset_dir}")
         
-        # Verify extraction was successful
-        audio_files = list(subset_dir.glob("*/*.flac"))
+        # Debug: Check what was actually extracted
+        print(f"🔍 Verifying extraction...")
+        print(f"   Expected directory: {subset_dir}")
+        print(f"   Directory exists: {subset_dir.exists()}")
+        
+        if subset_dir.exists():
+            subdirs = list(subset_dir.iterdir())
+            print(f"   Subdirectories found: {len(subdirs)}")
+            for subdir in subdirs[:5]:  # Show first 5
+                print(f"     - {subdir.name}")
+            if len(subdirs) > 5:
+                print(f"     ... and {len(subdirs) - 5} more")
+        
+        # Look for audio files in the expected structure
+        audio_files = list(subset_dir.glob("*/*/*.flac"))
         transcript_files = list(subset_dir.glob("*/*.trans.txt"))
         
-        if not audio_files:
-            raise RuntimeError(f"Extraction failed - no audio files found in {subset_dir}")
+        print(f"   Audio files found: {len(audio_files)}")
+        print(f"   Transcript files found: {len(transcript_files)}")
         
-        print(f"📊 Extracted {len(audio_files):,} audio files and {len(transcript_files):,} transcript files")
+        # If no files found in expected location, check the parent directory
+        if not audio_files:
+            print(f"🔍 No files in expected location, checking extraction root...")
+            cache_librispeech = cache_root / "LibriSpeech"
+            if cache_librispeech.exists():
+                all_subdirs = list(cache_librispeech.iterdir())
+                print(f"   LibriSpeech subdirectories: {[d.name for d in all_subdirs if d.is_dir()]}")
+                
+                # Check if files are in a different subset directory
+                for potential_dir in all_subdirs:
+                    if potential_dir.is_dir() and potential_dir.name == subset:
+                        test_audio = list(potential_dir.glob("*/*/*.flac"))
+                        if test_audio:
+                            print(f"   ✅ Found {len(test_audio)} audio files in {potential_dir}")
+                            # Update subset_dir to the correct location
+                            subset_dir = potential_dir
+                            audio_files = test_audio
+                            transcript_files = list(potential_dir.glob("*/*.trans.txt"))
+                            break
+                
+                # If still no files, check for any FLAC files anywhere under LibriSpeech
+                if not audio_files:
+                    all_flac = list(cache_librispeech.rglob("*.flac"))
+                    print(f"   Total FLAC files found anywhere: {len(all_flac)}")
+                    if all_flac:
+                        print(f"   Example locations: {[str(f.parent) for f in all_flac[:3]]}")
+        
+        if not audio_files:
+            print(f"❌ Extraction verification failed - no audio files found!")
+            print(f"   Manual check: ls -la {cache_root}/LibriSpeech/")
+            raise RuntimeError(f"Extraction verification failed - no audio files found. Check extraction manually at {cache_root}/LibriSpeech/")
+        
+        print(f"📊 Successfully verified: {len(audio_files):,} audio files and {len(transcript_files):,} transcript files")
         
         # Clean up tar file to save space only after successful extraction
         tar_file.unlink()
@@ -318,9 +364,14 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
         return subset_dir
         
     except subprocess.CalledProcessError as e:
+        # This is a tar extraction failure
         raise RuntimeError(f"Failed to extract LibriSpeech {subset}: {e}")
+    except RuntimeError as e:
+        # This is our own verification failure - re-raise as is
+        raise e
     except Exception as e:
-        raise RuntimeError(f"Error processing LibriSpeech {subset}: {e}")
+        # This is some other unexpected error
+        raise RuntimeError(f"Unexpected error processing LibriSpeech {subset}: {e}")
 
 
 def load_librispeech_local(subset: str, cache_root: Path, max_samples: Optional[int] = None, streaming: bool = False) -> Tuple[HFDataset, int]:
