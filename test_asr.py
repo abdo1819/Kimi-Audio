@@ -25,6 +25,8 @@ from typing import Tuple, Optional
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import urllib.request
+import time
 
 import wandb
 from tqdm import tqdm
@@ -40,6 +42,37 @@ from datetime import datetime
 colorama_init(autoreset=True)
 
 # ----------------------- LIBRISPEECH DIRECT DOWNLOAD ---------------------
+
+def get_librispeech_cache_dir() -> Path:
+    """Get the consistent cache directory for LibriSpeech downloads."""
+    cache_dir = Path(os.environ.get("LIBRISPEECH_CACHE", "~/.cache/librispeech")).expanduser()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+def _download_with_progress(url: str, output_path: Path) -> None:
+    """Download file with Python urllib and show progress."""
+    def progress_hook(block_num, block_size, total_size):
+        if total_size > 0:
+            downloaded = block_num * block_size
+            percent = min(100, (downloaded * 100) // total_size)
+            downloaded_mb = downloaded / (1024 * 1024)
+            total_mb = total_size / (1024 * 1024)
+            
+            # Simple progress bar
+            bar_length = 40
+            filled_length = int(bar_length * downloaded // total_size)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            
+            print(f'\r📥 [{bar}] {percent:3d}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)', end='', flush=True)
+    
+    try:
+        print(f"📥 Starting download with Python urllib...")
+        urllib.request.urlretrieve(url, output_path, reporthook=progress_hook)
+        print()  # New line after progress bar
+    except Exception as e:
+        if output_path.exists():
+            output_path.unlink()
+        raise RuntimeError(f"Python download failed: {e}")
 
 def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     """
@@ -69,10 +102,16 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     cache_root.mkdir(parents=True, exist_ok=True)
     subset_dir = cache_root / "LibriSpeech" / subset
     
-    # Check if already downloaded and extracted
+    # Check if already downloaded and extracted with proper validation
     if subset_dir.exists() and any(subset_dir.glob("*/*.flac")):
-        print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
-        return subset_dir
+        # Additional check: ensure we have both audio files and transcript files
+        has_audio = len(list(subset_dir.glob("*/*.flac"))) > 0
+        has_transcripts = len(list(subset_dir.glob("*/*.trans.txt"))) > 0
+        if has_audio and has_transcripts:
+            print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
+            return subset_dir
+        else:
+            print(f"⚠️  LibriSpeech {subset} partially downloaded, re-extracting...")
     
     url = LIBRISPEECH_URLS[subset]
     tar_file = cache_root / f"{subset}.tar.gz"
@@ -89,35 +128,122 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     }
     
     size_info = SUBSET_SIZES.get(subset, "unknown size")
-    print(f"📥 Downloading LibriSpeech {subset} ({size_info}) from {url}")
-    print(f"   This may take a while for large subsets...")
     
-    try:
-        # Download with wget/curl fallback
-        download_cmd = None
-        if subprocess.run(["which", "wget"], capture_output=True).returncode == 0:
-            download_cmd = ["wget", "-c", "-O", str(tar_file), url]
-        elif subprocess.run(["which", "curl"], capture_output=True).returncode == 0:
-            download_cmd = ["curl", "-L", "-C", "-", "-o", str(tar_file), url]
-        else:
-            raise RuntimeError("Neither wget nor curl found. Please install one of them.")
+    # Check if tar file already exists
+    if tar_file.exists():
+        file_size_mb = tar_file.stat().st_size / (1024 * 1024)
+        print(f"📦 Found existing archive: {tar_file} ({file_size_mb:.1f} MB)")
+        print(f"   Skipping download, proceeding with extraction...")
+    else:
+        print(f"📥 Downloading LibriSpeech {subset} ({size_info}) from {url}")
+        print(f"   This may take a while for large subsets...")
         
-        result = subprocess.run(download_cmd, check=True, capture_output=True, text=True)
+        # Try different download methods in order of preference
+        download_successful = False
+        last_error = None
+        
+        # Method 1: wget with progress
+        if not download_successful and subprocess.run(["which", "wget"], capture_output=True).returncode == 0:
+            try:
+                download_cmd = [
+                    "wget", 
+                    "-c",  # continue partial downloads
+                    "--progress=bar:force:noscroll",  # show progress bar
+                    "--show-progress",  # show progress even when not on tty
+                    "-O", str(tar_file), 
+                    url
+                ]
+                print(f"📥 Starting download with wget...")
+                subprocess.run(download_cmd, check=True)
+                download_successful = True
+            except subprocess.CalledProcessError as e:
+                last_error = f"wget failed: {e}"
+                if tar_file.exists():
+                    tar_file.unlink()
+        
+        # Method 2: curl with progress 
+        if not download_successful and subprocess.run(["which", "curl"], capture_output=True).returncode == 0:
+            try:
+                download_cmd = [
+                    "curl", 
+                    "-L",  # follow redirects
+                    "-C", "-",  # continue partial downloads
+                    "--progress-bar",  # show progress bar
+                    "-o", str(tar_file), 
+                    url
+                ]
+                print(f"📥 Starting download with curl...")
+                subprocess.run(download_cmd, check=True)
+                download_successful = True
+            except subprocess.CalledProcessError as e:
+                last_error = f"curl failed: {e}"
+                if tar_file.exists():
+                    tar_file.unlink()
+        
+        # Method 3: Python urllib as fallback
+        if not download_successful:
+            try:
+                _download_with_progress(url, tar_file)
+                download_successful = True
+            except Exception as e:
+                last_error = f"Python download failed: {e}"
+        
+        if not download_successful:
+            raise RuntimeError(f"All download methods failed. Last error: {last_error}")
+        
         print(f"✅ Download completed: {tar_file}")
-        
-        # Extract the archive
+    
+    # Extract the archive
+    try:
         print(f"📦 Extracting {tar_file}...")
-        subprocess.run(["tar", "-xzf", str(tar_file), "-C", str(cache_root)], check=True)
-        print(f"✅ Extraction completed: {subset_dir}")
         
-        # Clean up tar file to save space
+        # Show archive size for reference
+        archive_size_mb = tar_file.stat().st_size / (1024 * 1024)
+        print(f"   Archive size: {archive_size_mb:.1f} MB")
+        print(f"   This may take a few minutes for large archives...")
+        
+        # Use tar with progress indication
+        extract_cmd = ["tar", "-xzf", str(tar_file), "-C", str(cache_root)]
+        
+        # Start extraction and show a simple progress indicator
+        print(f"   Extracting", end="", flush=True)
+        start_time = time.time()
+        
+        # Run extraction in subprocess while showing progress dots
+        process = subprocess.Popen(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Show progress dots while extraction is running
+        while process.poll() is None:
+            print(".", end="", flush=True)
+            time.sleep(2)
+        
+        # Wait for completion
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            print(f"\n❌ Extraction failed!")
+            raise subprocess.CalledProcessError(process.returncode, extract_cmd, stderr.decode())
+        
+        elapsed_time = time.time() - start_time
+        print(f"\n✅ Extraction completed in {elapsed_time:.1f}s: {subset_dir}")
+        
+        # Verify extraction was successful
+        audio_files = list(subset_dir.glob("*/*.flac"))
+        transcript_files = list(subset_dir.glob("*/*.trans.txt"))
+        
+        if not audio_files:
+            raise RuntimeError(f"Extraction failed - no audio files found in {subset_dir}")
+        
+        print(f"📊 Extracted {len(audio_files):,} audio files and {len(transcript_files):,} transcript files")
+        
+        # Clean up tar file to save space only after successful extraction
         tar_file.unlink()
         print(f"🗑️  Removed {tar_file} to save space")
         
         return subset_dir
         
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to download/extract LibriSpeech {subset}: {e}")
+        raise RuntimeError(f"Failed to extract LibriSpeech {subset}: {e}")
     except Exception as e:
         raise RuntimeError(f"Error processing LibriSpeech {subset}: {e}")
 
@@ -516,7 +642,7 @@ if args.librispeech_use_hf:
         print("🔄 Using HuggingFace automatic download for LibriSpeech (may be slow/fail for large datasets)")
 else:
     if is_main_process:
-        cache_dir = Path(os.environ.get("LIBRISPEECH_CACHE", "~/.cache/librispeech")).expanduser()
+        cache_dir = get_librispeech_cache_dir()
         print(f"📁 Using direct LibriSpeech download (cached to: {cache_dir})")
 
 # -------------------------- W&B RESUME -------------------------------
@@ -674,7 +800,7 @@ def load_corpus(key: str, subset: Optional[str] = None, config_override: Optiona
 
     if key == "librispeech" and REGISTRY[key].get("local"):
         # local (direct download) scenario
-        cache_root = Path(os.environ.get("LIBRISPEECH_CACHE", "~/.cache/librispeech")).expanduser()
+        cache_root = get_librispeech_cache_dir()
         return load_librispeech_local(subset or REGISTRY[key]["def_subset"],
                                      cache_root=cache_root,
                                      max_samples=max_samples,

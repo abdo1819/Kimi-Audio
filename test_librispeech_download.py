@@ -11,7 +11,7 @@ from pathlib import Path
 # Add the current directory to the path so we can import from test_asr.py
 sys.path.insert(0, str(Path(__file__).parent))
 
-from test_asr import download_librispeech_subset, load_librispeech_local
+from test_asr import download_librispeech_subset, load_librispeech_local, get_librispeech_cache_dir
 
 def test_download_and_load(subset="test-clean", max_samples=5):
     """Test downloading and loading a small subset of LibriSpeech"""
@@ -19,9 +19,9 @@ def test_download_and_load(subset="test-clean", max_samples=5):
     print(f"🧪 Testing LibriSpeech direct download with subset: {subset}")
     print(f"   Max samples: {max_samples}")
     
-    # Set up cache directory
-    cache_root = Path("./test_librispeech_cache")
-    cache_root.mkdir(exist_ok=True)
+    # Use consistent cache directory (same as main script)
+    cache_root = get_librispeech_cache_dir()
+    print(f"   Using cache directory: {cache_root}")
     
     try:
         # Test download
@@ -51,12 +51,10 @@ def test_download_and_load(subset="test-clean", max_samples=5):
         return False
     
     finally:
-        # Optional: Clean up test cache (comment out to keep downloads)
-        # import shutil
-        # if cache_root.exists():
-        #     shutil.rmtree(cache_root)
-        #     print(f"🗑️  Cleaned up test cache: {cache_root}")
-        print(f"💾 Test cache preserved at: {cache_root}")
+        # Note: Downloads are preserved in the consistent cache location
+        # This allows reuse across test runs and with the main evaluation script
+        print(f"💾 Downloads preserved in cache: {cache_root}")
+        print(f"   Set LIBRISPEECH_CACHE environment variable to use a different location")
 
 if __name__ == "__main__":
     import argparse
