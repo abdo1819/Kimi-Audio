@@ -50,8 +50,16 @@ class KimiAPromptManager:
         token_ids = self.text_tokenizer.encode(text, bos=False, eos=False)
         return token_ids
 
-    def _tokenize_audio(self, wav_path):
-        wav_tokens = self.audio_tokenizer.tokenize(audio_path=wav_path)
+    def _tokenize_audio(self, wav_path, force_english=True):
+        if force_english:
+            # Force English language for Whisper tokenization
+            wav_tokens = self.audio_tokenizer.tokenize(
+                audio_path=wav_path, 
+                language='en'  # Force English
+            )
+        else:
+            wav_tokens = self.audio_tokenizer.tokenize(audio_path=wav_path)
+        
         wav_tokens = wav_tokens + self.kimia_token_offset
         wav_tokens_list = wav_tokens.squeeze(0).cpu().numpy().tolist()
         return wav_tokens_list
