@@ -3,7 +3,7 @@
 UPDATED – Whisper BasicTextNormalizer + CER & SER + CHiME‑8 datasets
 ------------------------------------------------------------------
 * **Normalization** now uses `transformers.models.whisper.english_normalizer.BasicTextNormalizer`,
-  matching Whisper’s official preprocessing.
+  matching Whisper's official preprocessing.
 * Added **CER** (character error rate) via `evaluate.load("cer")`.
 * Added **SER** (sentence/utterance error rate – a binary 0/1 per sample).
 * **CHiME‑8 support** – new `chime8` dataset option with initial support for
@@ -12,6 +12,8 @@ UPDATED – Whisper BasicTextNormalizer + CER & SER + CHiME‑8 datasets
   (CHiME‑6, Mixer‑6, DiPCo) generated with `chime-utils`.
 * W&B logs include running and final **WER/CER/SER** plus the
   per‑250‑step *new mistakes* table as before.
+* **Direct LibriSpeech download** - downloads directly from OpenSLR instead of using HF automatic download
+  to avoid issues with large datasets (30GB+).
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import torch.multiprocessing as mp
 import wandb
 from tqdm import tqdm
 import soundfile as sf
-from datasets import load_dataset, load_dataset_builder, Audio, IterableDataset
+from datasets import load_dataset, load_dataset_builder, Audio, IterableDataset, Dataset as HFDataset
 import evaluate
 from transformers.models.whisper.english_normalizer import BasicTextNormalizer
 from kimia_infer.api.kimia import KimiAudio
@@ -36,6 +38,185 @@ import pandas as pd
 from datetime import datetime
 
 colorama_init(autoreset=True)
+
+# ----------------------- LIBRISPEECH DIRECT DOWNLOAD ---------------------
+
+def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
+    """
+    Download LibriSpeech subset directly from OpenSLR if not already cached.
+    
+    Args:
+        subset: LibriSpeech subset name (e.g., 'test-clean', 'train-clean-100')
+        cache_root: Root directory for caching downloaded files
+        
+    Returns:
+        Path to the extracted LibriSpeech/{subset} directory
+    """
+    # Map subset names to download URLs
+    LIBRISPEECH_URLS = {
+        "test-clean": "https://us.openslr.org/resources/12/test-clean.tar.gz",
+        "test-other": "https://us.openslr.org/resources/12/test-other.tar.gz", 
+        "dev-clean": "https://us.openslr.org/resources/12/dev-clean.tar.gz",
+        "dev-other": "https://us.openslr.org/resources/12/dev-other.tar.gz",
+        "train-clean-100": "https://us.openslr.org/resources/12/train-clean-100.tar.gz",
+        "train-clean-360": "https://us.openslr.org/resources/12/train-clean-360.tar.gz", 
+        "train-other-500": "https://us.openslr.org/resources/12/train-other-500.tar.gz",
+    }
+    
+    if subset not in LIBRISPEECH_URLS:
+        raise ValueError(f"Unknown LibriSpeech subset: {subset}. Available: {list(LIBRISPEECH_URLS.keys())}")
+    
+    cache_root.mkdir(parents=True, exist_ok=True)
+    subset_dir = cache_root / "LibriSpeech" / subset
+    
+    # Check if already downloaded and extracted
+    if subset_dir.exists() and any(subset_dir.glob("*/*.flac")):
+        print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
+        return subset_dir
+    
+    url = LIBRISPEECH_URLS[subset]
+    tar_file = cache_root / f"{subset}.tar.gz"
+    
+    # Subset size information for user awareness
+    SUBSET_SIZES = {
+        "test-clean": "~346MB",
+        "test-other": "~328MB", 
+        "dev-clean": "~337MB",
+        "dev-other": "~314MB",
+        "train-clean-100": "~6.3GB",
+        "train-clean-360": "~23GB", 
+        "train-other-500": "~30GB",
+    }
+    
+    size_info = SUBSET_SIZES.get(subset, "unknown size")
+    print(f"📥 Downloading LibriSpeech {subset} ({size_info}) from {url}")
+    print(f"   This may take a while for large subsets...")
+    
+    try:
+        # Download with wget/curl fallback
+        download_cmd = None
+        if subprocess.run(["which", "wget"], capture_output=True).returncode == 0:
+            download_cmd = ["wget", "-c", "-O", str(tar_file), url]
+        elif subprocess.run(["which", "curl"], capture_output=True).returncode == 0:
+            download_cmd = ["curl", "-L", "-C", "-", "-o", str(tar_file), url]
+        else:
+            raise RuntimeError("Neither wget nor curl found. Please install one of them.")
+        
+        result = subprocess.run(download_cmd, check=True, capture_output=True, text=True)
+        print(f"✅ Download completed: {tar_file}")
+        
+        # Extract the archive
+        print(f"📦 Extracting {tar_file}...")
+        subprocess.run(["tar", "-xzf", str(tar_file), "-C", str(cache_root)], check=True)
+        print(f"✅ Extraction completed: {subset_dir}")
+        
+        # Clean up tar file to save space
+        tar_file.unlink()
+        print(f"🗑️  Removed {tar_file} to save space")
+        
+        return subset_dir
+        
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to download/extract LibriSpeech {subset}: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Error processing LibriSpeech {subset}: {e}")
+
+
+def load_librispeech_local(subset: str, cache_root: Path, max_samples: Optional[int] = None, streaming: bool = False) -> Tuple[HFDataset, int]:
+    """
+    Load LibriSpeech from locally downloaded files.
+    
+    Args:
+        subset: LibriSpeech subset name
+        cache_root: Root directory where LibriSpeech is cached
+        max_samples: Maximum number of samples to load
+        streaming: Whether to create a streaming dataset (for large datasets)
+        
+    Returns:
+        Tuple of (HuggingFace Dataset, number of samples)
+    """
+    subset_dir = download_librispeech_subset(subset, cache_root)
+    
+    print(f"📊 Loading LibriSpeech {subset} from {subset_dir}")
+    
+    # Collect all audio files and transcripts
+    records = []
+    total_files = 0
+    
+    # First pass: count total files if needed for streaming
+    if streaming:
+        for speaker_dir in subset_dir.glob("*"):
+            if speaker_dir.is_dir():
+                for chapter_dir in speaker_dir.glob("*"):
+                    if chapter_dir.is_dir():
+                        total_files += len(list(chapter_dir.glob("*.flac")))
+    
+    sample_count = 0
+    for speaker_dir in sorted(subset_dir.glob("*")):
+        if not speaker_dir.is_dir():
+            continue
+            
+        for chapter_dir in sorted(speaker_dir.glob("*")):
+            if not chapter_dir.is_dir():
+                continue
+                
+            # Find transcript file
+            transcript_file = chapter_dir / f"{speaker_dir.name}-{chapter_dir.name}.trans.txt"
+            if not transcript_file.exists():
+                print(f"⚠️  Warning: No transcript file found for {chapter_dir}")
+                continue
+            
+            # Load transcripts
+            transcripts = {}
+            with transcript_file.open("r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(" ", 1)
+                    if len(parts) == 2:
+                        audio_id, text = parts
+                        transcripts[audio_id] = text
+            
+            # Process FLAC files
+            for flac_file in sorted(chapter_dir.glob("*.flac")):
+                audio_id = flac_file.stem
+                if audio_id in transcripts:
+                    records.append({
+                        "audio": str(flac_file),
+                        "text": transcripts[audio_id],
+                        "speaker_id": int(speaker_dir.name),
+                        "chapter_id": int(chapter_dir.name),
+                        "utterance_id": audio_id,
+                    })
+                    sample_count += 1
+                    
+                    if max_samples and sample_count >= max_samples:
+                        break
+            
+            if max_samples and sample_count >= max_samples:
+                break
+        
+        if max_samples and sample_count >= max_samples:
+            break
+    
+    num_samples = len(records)
+    print(f"📊 Loaded {num_samples:,} samples from LibriSpeech {subset}")
+    
+    # Create dataset from JSON lines for HuggingFace compatibility
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for record in records:
+            json.dump(record, f)
+            f.write('\n')
+        temp_file = f.name
+    
+    try:
+        # Load using HuggingFace datasets with streaming support
+        ds = load_dataset('json', data_files=temp_file, split='train', streaming=streaming)
+        ds = ds.cast_column("audio", Audio(sampling_rate=16_000))
+        return ds, num_samples
+    finally:
+        # Clean up temp file
+        Path(temp_file).unlink(missing_ok=True)
+
 # ----------------------- DATASET REGISTRY ----------------------------
 # ────────────────────────── NOTSOFAR helpers ──────────────────────────
 
@@ -186,7 +367,7 @@ def _parse_librispeech_subset(label: str) -> Tuple[str, str]:
 REGISTRY = {
     # Existing benchmarks
     "librispeech": dict(
-        hf="librispeech_asr",
+        local=True,  # Use direct download instead of HF
         subset_parser=_parse_librispeech_subset,
         audio="audio",
         text="text",
@@ -280,6 +461,12 @@ parser.add_argument(
     help="Optional NOTSOFAR tag like '240825.1_dev1' "
          "(overrides the built-in defaults)",
 )
+parser.add_argument(
+    "--librispeech_use_hf", 
+    action="store_true",
+    help="Use HuggingFace automatic download for LibriSpeech instead of direct download "
+         "(may fail for large datasets due to 30GB+ size)",
+)
 # Multi-GPU support
 parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (1 or 2)")
 parser.add_argument("--local_rank", type=int, default=0, help="Local rank for distributed processing")
@@ -314,6 +501,23 @@ else:
 
 # Only rank 0 handles W&B and main coordination
 is_main_process = rank == 0
+
+# Update LibriSpeech registry based on command line argument
+if args.librispeech_use_hf:
+    REGISTRY["librispeech"] = dict(
+        hf="librispeech_asr",
+        subset_parser=_parse_librispeech_subset,
+        audio="audio",
+        text="text",
+        def_subset="test-clean",
+        sr=16_000,
+    )
+    if is_main_process:
+        print("🔄 Using HuggingFace automatic download for LibriSpeech (may be slow/fail for large datasets)")
+else:
+    if is_main_process:
+        cache_dir = Path(os.environ.get("LIBRISPEECH_CACHE", "~/.cache/librispeech")).expanduser()
+        print(f"📁 Using direct LibriSpeech download (cached to: {cache_dir})")
 
 # -------------------------- W&B RESUME -------------------------------
 RESUME_FILE = Path(".wandb_run_id")
@@ -467,6 +671,14 @@ def load_corpus(key: str, subset: Optional[str] = None, config_override: Optiona
         # local (chime-utils) scenario
         subset = subset or REGISTRY[key]["def_subset"]
         return _load_local_chime8(subset, max_samples=max_samples)
+
+    if key == "librispeech" and REGISTRY[key].get("local"):
+        # local (direct download) scenario
+        cache_root = Path(os.environ.get("LIBRISPEECH_CACHE", "~/.cache/librispeech")).expanduser()
+        return load_librispeech_local(subset or REGISTRY[key]["def_subset"],
+                                     cache_root=cache_root,
+                                     max_samples=max_samples,
+                                     streaming=streaming)
 
     cfg = REGISTRY[key]
 

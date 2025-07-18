@@ -45,6 +45,8 @@ def run_evaluation_process(rank, world_size, args):
         cmd.extend(['--wandb_run_name', args.wandb_run_name])
     if args.notsofar_version:
         cmd.extend(['--notsofar_version', args.notsofar_version])
+    if args.librispeech_use_hf:
+        cmd.append('--librispeech_use_hf')
     
     print(f"🚀 Starting GPU {rank} process with command:")
     print(f"   {' '.join(cmd)}")
@@ -78,6 +80,8 @@ def main():
     parser.add_argument("--wandb_project", default="kimi-audio-multi-eval", help="W&B project name")
     parser.add_argument("--wandb_run_name", help="W&B run name")
     parser.add_argument("--notsofar_version", help="NOTSOFAR version tag")
+    parser.add_argument("--librispeech_use_hf", action="store_true", 
+                       help="Use HuggingFace download for LibriSpeech (may fail for large datasets)")
     
     # Additional options
     parser.add_argument("--auto_merge", action="store_true", help="Automatically merge parquet files after completion")

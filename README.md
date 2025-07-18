@@ -155,7 +155,28 @@ print("Kimi-Audio inference examples complete.")
 
 ## Evaluation
 
-Kimi-Audio achieves state-of-the-art (SOTA) performance across a wide range of audio benchmarks. 
+Kimi-Audio achieves state-of-the-art (SOTA) performance across a wide range of audio benchmarks.
+
+### 🆕 LibriSpeech Direct Download
+
+**New Feature**: Direct LibriSpeech download to avoid HuggingFace issues with large datasets (30GB+).
+
+By default, LibriSpeech is now downloaded directly from OpenSLR:
+```bash
+# Direct download (default, recommended)
+python test_asr.py --dataset librispeech --subset test-clean
+
+# Force HuggingFace download (legacy, may fail for large datasets)
+python test_asr.py --dataset librispeech --subset test-clean --librispeech_use_hf
+```
+
+Configure cache location:
+```bash
+export LIBRISPEECH_CACHE="/path/to/cache"
+python test_asr.py --dataset librispeech --subset train-clean-360
+```
+
+📖 **See [LIBRISPEECH_DIRECT_DOWNLOAD.md](LIBRISPEECH_DIRECT_DOWNLOAD.md) for detailed documentation.** 
 
 The below is the overall performance:
 <p align="center">
