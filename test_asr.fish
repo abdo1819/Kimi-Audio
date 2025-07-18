@@ -24,6 +24,16 @@
 # You can follow the live logs with e.g.  tail -f logs/(ls -t logs | head -n1)
 # -----------------------------------------------------------------------------
 
+# --- GPU detection function (defined first) -----------------------------------
+function check_gpu_availability
+    if command -q nvidia-smi
+        set -l gpu_count (nvidia-smi --query-gpu=name --format=csv,noheader,nounits | wc -l)
+        echo $gpu_count
+    else
+        echo 0
+    end
+end
+
 # --- Parse arguments to detect GPU settings -----------------------------------
 set USE_MULTI_GPU false
 set NUM_GPUS 1
@@ -54,7 +64,7 @@ for i in (seq (count $argv))
             echo "  Runs in background with detailed logging and result consolidation."
             echo ""
             echo "USAGE:"
-            echo "  $argv[0] [LAUNCHER_OPTIONS] [EVALUATION_OPTIONS]"
+            echo "  ./test_asr.fish [LAUNCHER_OPTIONS] [EVALUATION_OPTIONS]"
             echo ""
             echo "LAUNCHER OPTIONS:"
             echo "  -h, --help       Show this help message and exit"
@@ -80,16 +90,16 @@ for i in (seq (count $argv))
             echo ""
             echo "EXAMPLES:"
             echo "  # Single GPU evaluation"
-            echo "  $argv[0] --dataset librispeech --subset test-clean"
+            echo "  ./test_asr.fish --dataset librispeech --subset test-clean"
             echo ""
             echo "  # Multi-GPU with auto-merge (recommended)"
-            echo "  $argv[0] --num_gpus 2 --dataset librispeech --subset test-clean --auto_merge"
+            echo "  ./test_asr.fish --num_gpus 2 --dataset librispeech --subset test-clean --auto_merge"
             echo ""
             echo "  # CHiME-8 evaluation with cleanup"
-            echo "  $argv[0] --num_gpus 2 --dataset chime8_notsofar1 --subset dev --auto_merge --cleanup"
+            echo "  ./test_asr.fish --num_gpus 2 --dataset chime8_notsofar1 --subset dev --auto_merge --cleanup"
             echo ""
             echo "  # Limited samples for testing"
-            echo "  $argv[0] --dataset ami --subset dev --max_samples 100"
+            echo "  ./test_asr.fish --dataset ami --subset dev --max_samples 100"
             echo ""
             echo "MONITORING:"
             echo "  After launch, monitor progress with:"
@@ -101,7 +111,8 @@ for i in (seq (count $argv))
             echo "  • logs/                      - Execution logs with timestamps"
             echo ""
             echo "GPU DETECTION:"
-            echo "  Available GPUs: "(check_gpu_availability)" (detected via nvidia-smi)"
+            set gpu_count (check_gpu_availability)
+            echo "  Available GPUs: $gpu_count (detected via nvidia-smi)"
             echo ""
             echo "NOTES:"
             echo "  • Evaluation runs in background and survives terminal disconnection"
@@ -126,33 +137,6 @@ if test $USE_MULTI_GPU = true
     set LOG_FILE "$LOG_DIR/multi_gpu_asr_$TS.log"
 else
     set LOG_FILE "$LOG_DIR/single_gpu_asr_$TS.log"
-end
-
-# --- Auto-detect available GPUs -----------------------------------------------
-function check_gpu_availability
-    if command -q nvidia-smi
-        set -l gpu_count (nvidia-smi --query-gpu=name --format=csv,noheader,nounits | wc -l)
-        echo $gpu_count
-    else
-        echo 0
-    end
-end
-
-set AVAILABLE_GPUS (check_gpu_availability)
-
-if test $AVAILABLE_GPUS -eq 0
-    echo "[launcher] ❌ No CUDA GPUs detected. Falling back to CPU (if supported)."
-    set USE_MULTI_GPU false
-    set NUM_GPUS 1
-else if test $NUM_GPUS -gt $AVAILABLE_GPUS
-    echo "[launcher] ⚠️  Requested $NUM_GPUS GPUs but only $AVAILABLE_GPUS available."
-    echo "[launcher] 🔧 Adjusting to use $AVAILABLE_GPUS GPUs."
-    set NUM_GPUS $AVAILABLE_GPUS
-    if test $NUM_GPUS -gt 1
-        set USE_MULTI_GPU true
-    else
-        set USE_MULTI_GPU false
-    end
 end
 
 # --- Launch evaluation script --------------------------------------------------
