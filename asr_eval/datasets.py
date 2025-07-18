@@ -4,8 +4,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 from pathlib import Path
 import os
-from datasets import load_dataset, load_dataset_builder, Audio, IterableDataset
-
+from datasets import load_dataset, load_dataset_builder, Audio, IterableDataset, DownloadConfig
 from .registry import REGISTRY
 from .notsofar import download_notsofar_transcripts, attach_notsofar_transcripts
 
@@ -36,7 +35,7 @@ def safe_cast(ds, column, sr):
 
 def _load_local_chime8(subset: str, *, max_samples: Optional[int] = None):
     import glob, json
-    from datasets import load_dataset
+    
 
     root = Path(os.environ.get("CHIME8_ROOT", "./chime8_dasr")).expanduser()
     scenario_dir = root / subset
@@ -79,8 +78,11 @@ def load_corpus(key: str, subset: Optional[str] = None, *, streaming=False, max_
             ds = ds.take(max_samples)
             num = min(num or max_samples, max_samples)
         return ds, num
+    timeout = 5000 
+    dcfg = DownloadConfig(resume_download=True, max_retries=10,storage_options={"timeout": timeout})
+    
 
     # generic HF dataset
-    ds = load_dataset(cfg["hf"], split=subset or cfg["def_subset"], streaming=streaming, trust_remote_code=True)
+    ds = load_dataset(cfg["hf"], split=subset or cfg["def_subset"], streaming=streaming, trust_remote_code=True,download_config=dcfg)
     ds = safe_cast(ds, cfg["audio"], cfg["sr"])
     return ds, None
