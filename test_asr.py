@@ -506,6 +506,50 @@ def load_corpus(key: str, subset: Optional[str] = None, config_override: Optiona
             num = min(num or max_samples, max_samples)
         return ds, num
 
+    # ---------- General HF dataset handling ----------
+    # Handle other datasets in the registry (librispeech, ami, wham, etc.)
+    subset = subset or cfg["def_subset"]
+    config = config_override or cfg.get("config")
+    
+    # Handle LibriSpeech subset parsing
+    if key == "librispeech" and "subset_parser" in cfg:
+        config_name, split_name = cfg["subset_parser"](subset)
+        split = split_name
+        config = config_name
+    else:
+        split = subset
+    
+    # Load dataset builder to get metadata
+    builder = load_dataset_builder(cfg["hf"], name=config, trust_remote_code=True)
+    num = _safe_num_examples(builder, split)
+    
+    # Load the actual dataset
+    ds = load_dataset(
+        cfg["hf"],
+        name=config,
+        split=split,
+        streaming=streaming,
+        trust_remote_code=True
+    )
+    
+    # Rename text column if needed
+    if cfg.get("text") and cfg["text"] != "text":
+        ds = ds.rename_column(cfg["text"], "text")
+    
+    # Cast audio to correct sampling rate
+    if cfg.get("audio"):
+        ds = safe_cast(ds, cfg["audio"], cfg.get("sr", 16_000))
+    
+    # Apply max_samples limit
+    if max_samples:
+        if streaming:
+            ds = ds.take(max_samples)
+        else:
+            ds = ds.select(range(min(max_samples, len(ds))))
+        num = min(num or max_samples, max_samples)
+    
+    return ds, num
+
 # -------------------------- METRICS ----------------------------------
 normalizer = BasicTextNormalizer()
 wer_metric = evaluate.load("wer")
