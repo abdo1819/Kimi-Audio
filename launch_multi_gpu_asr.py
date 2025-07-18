@@ -52,13 +52,13 @@ def run_evaluation_process(rank, world_size, args):
     try:
         result = subprocess.run(cmd, env=env, check=True)
         print(f"✅ GPU {rank} completed successfully")
-        return result.returncode
+        sys.exit(result.returncode)
     except subprocess.CalledProcessError as e:
         print(f"❌ GPU {rank} failed with exit code {e.returncode}")
-        return e.returncode
+        sys.exit(e.returncode)
     except KeyboardInterrupt:
         print(f"🛑 GPU {rank} interrupted by user")
-        return 130
+        sys.exit(130)
 
 
 def main():

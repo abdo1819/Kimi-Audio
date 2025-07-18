@@ -163,16 +163,24 @@ def _attach_notsofar_transcripts(ds, subset_dir: Path):
 
 
 def _parse_librispeech_subset(label: str) -> Tuple[str, str]:
+    # Normalize label: convert dots to hyphens for LibriSpeech naming convention
+    normalized_label = label.replace(".", "-")
+    
     mapping = {
         "test-clean": ("clean", "test"),
         "test-other": ("other", "test"),
         "dev-clean": ("clean", "validation"),
         "dev-other": ("other", "validation"),
         "train-clean-100": ("clean", "train.100"),
-        "train-clean-360": ("other", "train.360"),
+        "train-clean-360": ("clean", "train.360"),
         "train-other-500": ("other", "train.500"),
     }
-    return mapping[label]
+    
+    if normalized_label not in mapping:
+        available = list(mapping.keys())
+        raise ValueError(f"Unknown LibriSpeech subset: '{label}'. Available subsets: {available}")
+    
+    return mapping[normalized_label]
 
 
 REGISTRY = {
