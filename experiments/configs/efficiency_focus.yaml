@@ -1,0 +1,59 @@
+# Efficiency Focus Configuration
+# Focus on compute efficiency comparisons
+
+name: "efficiency_focus"
+description: "Focus on computational efficiency and budget matching"
+output_dir: "experiments/results"
+
+# Model configuration
+model_backend: "kimia"
+model_path: "moonshotai/Kimi-Audio-7B-Instruct"
+load_detokenizer: true
+
+# Efficiency-focused conditions
+conditions:
+  - "cot_zero_shot"
+  - "cot_few_shot"
+  - "latent_silent"
+  - "latent_loops"
+
+# CoT parameters for efficiency testing
+cot_chain_lengths: [16, 32, 64]
+cot_self_consistency_k: [1, 3]
+cot_use_skill_retrieval: false
+
+# Latent parameters for efficiency testing
+latent_loop_depths: [2, 4, 6]
+latent_use_timestep_embeddings: false
+
+# Strict budget matching
+budget_matching: "flops"
+max_total_tokens: 500
+max_generation_time: 20.0
+
+# Efficiency-focused datasets
+datasets:
+  - "synthetic_count"
+  - "temporal_reasoning"
+max_samples_per_dataset: 50
+noise_conditions:
+  - "clean"
+
+# Efficiency metrics
+metrics:
+  - "accuracy"
+  - "token_efficiency"
+  - "latency"
+eval_batch_size: 1
+
+# Sampling
+temperature: 0.0
+top_k: 5
+seeds: [42, 123]
+
+# Logging
+wandb_project: "audio_reasoning_efficiency"
+wandb_run_name: null
+save_predictions: true
+save_traces: false  # Save space
+log_level: "INFO"

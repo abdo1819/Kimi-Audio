@@ -1,0 +1,56 @@
+# Quick Test Configuration
+# Minimal settings for fast testing
+
+name: "quick_test"
+description: "Quick test with minimal settings for development"
+output_dir: "experiments/results"
+
+# Model configuration
+model_backend: "kimia"
+model_path: "moonshotai/Kimi-Audio-7B-Instruct"
+load_detokenizer: true
+
+# Reasoning conditions to test
+conditions:
+  - "cot_zero_shot"
+  - "latent_silent"
+
+# CoT parameters
+cot_chain_lengths: [0, 16]
+cot_self_consistency_k: [1]
+cot_use_skill_retrieval: false
+
+# Latent parameters
+latent_loop_depths: [0, 2]
+latent_use_timestep_embeddings: false
+
+# Compute budget
+budget_matching: "tokens"
+max_total_tokens: 200
+max_generation_time: 10.0
+
+# Datasets
+datasets:
+  - "synthetic_count"
+max_samples_per_dataset: 5
+noise_conditions:
+  - "clean"
+
+# Evaluation
+metrics:
+  - "accuracy"
+  - "token_efficiency"
+  - "latency"
+eval_batch_size: 1
+
+# Sampling
+temperature: 0.0
+top_k: 5
+seeds: [42]
+
+# Logging
+wandb_project: "audio_reasoning_test"
+wandb_run_name: null
+save_predictions: true
+save_traces: true
+log_level: "INFO"

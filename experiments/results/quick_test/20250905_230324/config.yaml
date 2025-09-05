@@ -1,0 +1,42 @@
+budget_matching: flops
+conditions:
+- cot_zero_shot
+- latent_silent
+cot_chain_lengths:
+- 0
+- 16
+cot_self_consistency_k:
+- 1
+- 3
+cot_use_skill_retrieval: true
+datasets:
+- synthetic_count
+description: Quick test with minimal settings
+eval_batch_size: 1
+latent_loop_depths:
+- 0
+- 2
+latent_use_timestep_embeddings: false
+load_detokenizer: true
+log_level: INFO
+max_generation_time: 30.0
+max_samples_per_dataset: 2
+max_total_tokens: 200
+metrics:
+- accuracy
+- token_efficiency
+- latency
+model_backend: kimia
+model_path: moonshotai/Kimi-Audio-7B-Instruct
+name: quick_test
+noise_conditions:
+- clean
+output_dir: experiments/results
+save_predictions: true
+save_traces: true
+seeds:
+- 42
+temperature: 0.0
+top_k: 5
+wandb_project: audio_reasoning_comparison
+wandb_run_name: null

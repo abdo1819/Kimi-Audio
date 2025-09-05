@@ -1,0 +1,67 @@
+# Full Comparison Configuration
+# Comprehensive evaluation across all conditions
+
+name: "full_comparison"
+description: "Comprehensive comparison across all reasoning conditions"
+output_dir: "experiments/results"
+
+# Model configuration
+model_backend: "kimia"
+model_path: "moonshotai/Kimi-Audio-7B-Instruct"
+load_detokenizer: true
+
+# All reasoning conditions
+conditions:
+  - "cot_zero_shot"
+  - "cot_few_shot"
+  - "cot_descriptive"
+  - "latent_silent"
+  - "latent_loops"
+
+# CoT parameters
+cot_chain_lengths: [0, 16, 64]
+cot_self_consistency_k: [1, 5]
+cot_use_skill_retrieval: true
+
+# Latent parameters
+latent_loop_depths: [0, 2, 4, 8]
+latent_use_timestep_embeddings: true
+
+# Compute budget matching
+budget_matching: "flops"
+max_total_tokens: 1000
+max_generation_time: 30.0
+
+# Comprehensive datasets
+datasets:
+  - "librispeech_qa"
+  - "synthetic_count"
+  - "temporal_reasoning"
+  - "speaker_reasoning"
+max_samples_per_dataset: 100
+noise_conditions:
+  - "clean"
+  - "snr_15"
+  - "snr_10"
+
+# Full evaluation metrics
+metrics:
+  - "accuracy"
+  - "wer"
+  - "cer"
+  - "token_efficiency"
+  - "latency"
+  - "calibration"
+eval_batch_size: 1
+
+# Sampling parameters
+temperature: 0.0
+top_k: 5
+seeds: [42, 123, 456]
+
+# Logging
+wandb_project: "audio_reasoning_comparison"
+wandb_run_name: null
+save_predictions: true
+save_traces: true
+log_level: "INFO"

@@ -118,15 +118,42 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
     needs_download = False
     
     # Check if already downloaded and extracted with proper validation
-    if subset_dir.exists() and any(subset_dir.glob("*/*/*.flac")):
-        # Additional check: ensure we have both audio files and transcript files
-        has_audio = len(list(subset_dir.glob("*/*/*.flac"))) > 0
-        has_transcripts = len(list(subset_dir.glob("*/*.trans.txt"))) > 0
+    if subset_dir.exists():
+        # Check for audio files with more flexible patterns
+        audio_patterns = [
+            "*/*/*.flac",  # Standard LibriSpeech structure
+            "*/*.flac",    # Alternative structure
+            "*.flac"       # Flat structure
+        ]
+        
+        transcript_patterns = [
+            "*/*.trans.txt",  # Standard LibriSpeech structure  
+            "*.trans.txt",    # Alternative structure
+        ]
+        
+        has_audio = False
+        has_transcripts = False
+        
+        for pattern in audio_patterns:
+            if list(subset_dir.glob(pattern)):
+                has_audio = True
+                break
+                
+        for pattern in transcript_patterns:
+            if list(subset_dir.glob(pattern)):
+                has_transcripts = True
+                break
+        
         if has_audio and has_transcripts:
             print(f"✅ LibriSpeech {subset} already downloaded at {subset_dir}")
             return subset_dir
-        else:
+        elif has_audio or has_transcripts:
             print(f"⚠️  LibriSpeech {subset} partially downloaded or corrupted")
+            print(f"    Audio files found: {has_audio}")
+            print(f"    Transcript files found: {has_transcripts}")
+            needs_download = True
+        else:
+            print(f"📁 LibriSpeech {subset} exists but no audio/transcript files found")
             needs_download = True
     else:
         print(f"📁 LibriSpeech {subset} not found in cache")
