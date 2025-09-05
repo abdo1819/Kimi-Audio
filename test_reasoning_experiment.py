@@ -169,6 +169,90 @@ def test_mock_experiment():
     assert len(results["individual_results"]) == 2
     print("✓ Mock experiment run works")
 
+def test_detailed_logging():
+    """Test detailed JSON logging functionality"""
+    print("\nTesting detailed JSON logging...")
+    
+    import tempfile
+    import os
+    from reasoning_framework.detailed_logger import create_detailed_logger
+    
+    # Create temporary directory for testing
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Initialize detailed logger
+        logger = create_detailed_logger(temp_dir, "test_experiment")
+        
+        # Start a trace
+        trace_id = logger.start_evaluation_trace(
+            task_id="test_task_1",
+            condition="cot_zero_shot",
+            dataset="test_dataset",
+            seed=42,
+            audio_path="/fake/audio.wav",
+            question="How many beeps?",
+            ground_truth="3",
+            task_type="counting",
+            difficulty="easy"
+        )
+        
+        # Log some steps
+        logger.log_prompt_generation(
+            trace_id=trace_id,
+            prompt_type="cot_zero_shot",
+            raw_prompt="How many beeps?",
+            processed_prompt="Let's think step by step. How many beeps?",
+            prompt_tokens=10,
+            generation_time=0.1
+        )
+        
+        logger.log_reasoning_chain_step(
+            trace_id=trace_id,
+            step_number=1,
+            reasoning_text="I need to count the beeps in the audio",
+            intermediate_conclusion="Starting to count",
+            confidence=0.7,
+            tokens_used=8
+        )
+        
+        logger.log_budget_usage(
+            trace_id=trace_id,
+            budget_type="tokens",
+            allocated=100,
+            used=18,
+            efficiency=0.18
+        )
+        
+        # Complete the trace
+        logger.complete_evaluation_trace(
+            trace_id=trace_id,
+            final_answer="3",
+            is_correct=True,
+            confidence_score=0.8,
+            total_tokens=18,
+            memory_peak_mb=512.0
+        )
+        
+        # Save experiment summary
+        logger.save_experiment_summary()
+        
+        # Verify files were created
+        traces_dir = Path(temp_dir) / "detailed_traces"
+        assert traces_dir.exists()
+        assert (traces_dir / "traces_index.json").exists()
+        assert (traces_dir / f"trace_{trace_id}.json").exists()
+        assert (Path(temp_dir) / "test_experiment_detailed_log.json").exists()
+        
+        # Verify trace content
+        with open(traces_dir / f"trace_{trace_id}.json", 'r') as f:
+            trace_data = json.load(f)
+            assert trace_data["task_id"] == "test_task_1"
+            assert trace_data["condition"] == "cot_zero_shot"
+            assert trace_data["final_answer"] == "3"
+            assert trace_data["is_correct"] == True
+            assert len(trace_data["reasoning_steps"]) > 0
+        
+        print("✓ Detailed JSON logging works")
+
 def main():
     """Run all tests"""
     print("🧪 Testing CoT vs Latent Reasoning Experiment Framework")
@@ -181,11 +265,16 @@ def main():
         test_budget_controller()
         test_evaluation()
         test_mock_experiment()
+        test_detailed_logging()
         
         print("\n" + "=" * 60)
         print("✅ All tests passed! The framework is ready to use.")
-        print("\nTo run a real experiment:")
+        print("\nTo run experiments with detailed JSON logging:")
         print("  python run_reasoning_experiment.py --preset quick_test")
+        print("  python run_reasoning_experiment.py --config experiments/configs/detailed_logging_test.yaml")
+        print("\nTo analyze detailed traces:")
+        print("  python experiments/analyze_traces.py experiments/results/[experiment_dir]/")
+        print("  python experiments/analyze_traces.py experiments/results/exp1/ --compare experiments/results/exp2/")
         
     except Exception as e:
         print(f"\n❌ Test failed with error: {e}")

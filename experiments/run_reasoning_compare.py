@@ -35,6 +35,7 @@ from experiments.reasoning_framework.datasets import ReasoningDatasetLoader
 from experiments.reasoning_framework.evaluation import ReasoningEvaluator
 from experiments.reasoning_framework.budget_controller import ComputeBudgetController
 from experiments.reasoning_framework.utils import set_seed, get_device_info
+from experiments.reasoning_framework.detailed_logger import create_detailed_logger
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ class ReasoningExperiment:
         self.results = {}
         self.setup_logging()
         self.setup_output_dirs()
+        self.detailed_logger = None
         
     def setup_logging(self):
         """Configure logging"""
@@ -175,6 +177,13 @@ class ReasoningExperiment:
             yaml.dump(asdict(self.config), f, default_flow_style=False)
         
         logger.info(f"Output directory: {self.output_dir}")
+        
+        # Initialize detailed JSON logger
+        self.detailed_logger = create_detailed_logger(
+            output_dir=str(self.output_dir),
+            experiment_name=self.config.name
+        )
+        logger.info("Initialized detailed JSON logger")
     
     def initialize_wandb(self):
         """Initialize Weights & Biases logging"""
@@ -247,11 +256,12 @@ class ReasoningExperiment:
             max_time=self.config.max_generation_time
         )
         
-        # Initialize evaluator
+        # Initialize evaluator with detailed logger
         evaluator = ReasoningEvaluator(
             metrics=self.config.metrics,
             save_predictions=self.config.save_predictions,
-            save_traces=self.config.save_traces
+            save_traces=self.config.save_traces,
+            detailed_logger=self.detailed_logger
         )
         
         # Run evaluation
@@ -436,10 +446,16 @@ class ReasoningExperiment:
         self.save_results(all_results, aggregated_results)
         self.log_to_wandb(aggregated_results)
         
+        # Save detailed experiment summary
+        if self.detailed_logger:
+            self.detailed_logger.save_experiment_summary()
+            logger.info("Detailed traces and analysis saved")
+        
         # Print summary
         total_time = time.time() - start_time
         logger.info(f"Experiment completed in {total_time:.1f}s")
         logger.info(f"Results saved to: {self.output_dir}")
+        logger.info(f"Detailed traces: {self.output_dir}/detailed_traces/")
         
         if self.config.wandb_project:
             wandb.finish()

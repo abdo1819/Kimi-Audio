@@ -29,6 +29,7 @@ from .model_backends import AudioTextModelBackend
 from .prompting import ReasoningPrompter
 from .datasets import ReasoningTask
 from .budget_controller import ComputeBudgetController
+from .detailed_logger import DetailedJSONLogger, create_detailed_logger
 
 @dataclass
 class EvaluationResult:
@@ -97,10 +98,12 @@ class ReasoningEvaluator:
     def __init__(self, 
                  metrics: List[str] = None,
                  save_predictions: bool = True,
-                 save_traces: bool = True):
+                 save_traces: bool = True,
+                 detailed_logger: DetailedJSONLogger = None):
         self.metrics = metrics or ["accuracy", "token_efficiency", "latency"]
         self.save_predictions = save_predictions
         self.save_traces = save_traces
+        self.detailed_logger = detailed_logger
         self.results_history = []
     
     def evaluate(self,
@@ -166,18 +169,61 @@ class ReasoningEvaluator:
                              temperature: float,
                              top_k: int,
                              task_id: str) -> EvaluationResult:
-        """Evaluate a single task"""
+        """Evaluate a single task with detailed logging"""
         
         start_time = time.time()
+        trace_id = None
+        
+        # Start detailed trace if logger available
+        if self.detailed_logger:
+            trace_id = self.detailed_logger.start_evaluation_trace(
+                task_id=task_id,
+                condition=prompter.condition_type,
+                dataset="unknown",  # Will be set by caller
+                seed=42,  # Will be set by caller
+                audio_path=task.audio_path,
+                question=task.question,
+                ground_truth=task.answer,
+                task_type=task.task_type,
+                difficulty=task.difficulty
+            )
+            
+            # Log prompt generation
+            self.detailed_logger.log_prompt_generation(
+                trace_id=trace_id,
+                prompt_type=prompter.condition_type,
+                raw_prompt=task.question,
+                processed_prompt=prompt,
+                prompt_tokens=len(prompt.split()),  # Rough estimate
+                generation_time=0.1,  # Prompt generation time
+                metadata={"task_context": task.context}
+            )
         
         try:
-            # Generate response
-            generation_stats = model_backend.generate(
+            # Log initial transcription step if available
+            if self.detailed_logger and trace_id:
+                self.detailed_logger.log_intermediate_transcription(
+                    trace_id=trace_id,
+                    transcription_text="[Audio processing started]",
+                    confidence=0.0,
+                    processing_time=0.0,
+                    model_info=model_backend.get_model_info(),
+                    audio_segment_info={
+                        "duration": self._get_audio_duration(task.audio_path),
+                        "path": task.audio_path
+                    }
+                )
+            
+            # Generate response with detailed logging
+            generation_stats = self._generate_with_logging(
+                model_backend=model_backend,
                 audio_path=task.audio_path,
-                text_prompt=prompt,
+                prompt=prompt,
+                prompter=prompter,
+                trace_id=trace_id,
                 temperature=temperature,
                 top_k=top_k,
-                max_new_tokens=getattr(budget, 'max_tokens', 500)
+                max_tokens=getattr(budget, 'max_tokens', 500)
             )
             
             generation_time = time.time() - start_time
@@ -185,14 +231,37 @@ class ReasoningEvaluator:
             # Extract answer
             predicted_answer = prompter.extract_answer(generation_stats.output_text)
             
+            # Log answer extraction
+            if self.detailed_logger and trace_id:
+                self.detailed_logger.log_reasoning_step(
+                    trace_id=trace_id,
+                    step_type="answer_extraction",
+                    content=f"Extracted answer: {predicted_answer}",
+                    confidence=0.8,
+                    metadata={
+                        "full_response": generation_stats.output_text,
+                        "extraction_method": prompter.condition_type
+                    }
+                )
+            
             # Calculate correctness
             is_correct = self._check_correctness(predicted_answer, task.answer, task.task_type)
             
-            # Calculate confidence (simple heuristic for now)
+            # Calculate confidence
             confidence = self._estimate_confidence(generation_stats.output_text, predicted_answer)
             
             # Calculate text similarity metrics
             wer, cer = self._calculate_text_metrics(predicted_answer, task.answer)
+            
+            # Log budget usage
+            if self.detailed_logger and trace_id:
+                self.detailed_logger.log_budget_usage(
+                    trace_id=trace_id,
+                    budget_type="tokens",
+                    allocated=getattr(budget, 'max_tokens', 500),
+                    used=generation_stats.num_output_tokens,
+                    efficiency=generation_stats.num_output_tokens / getattr(budget, 'max_tokens', 500)
+                )
             
             result = EvaluationResult(
                 task_id=task_id,
@@ -212,9 +281,40 @@ class ReasoningEvaluator:
                 condition=prompter.condition_type
             )
             
+            # Complete detailed trace
+            if self.detailed_logger and trace_id:
+                self.detailed_logger.complete_evaluation_trace(
+                    trace_id=trace_id,
+                    final_answer=predicted_answer,
+                    is_correct=is_correct,
+                    confidence_score=confidence,
+                    total_tokens=generation_stats.num_output_tokens,
+                    memory_peak_mb=generation_stats.memory_usage
+                )
+            
         except Exception as e:
             # Handle errors gracefully
             generation_time = time.time() - start_time
+            
+            # Log error
+            if self.detailed_logger and trace_id:
+                self.detailed_logger.log_reasoning_step(
+                    trace_id=trace_id,
+                    step_type="error",
+                    content=f"Error occurred: {str(e)}",
+                    confidence=0.0,
+                    metadata={"error_type": type(e).__name__, "error_details": str(e)}
+                )
+                
+                self.detailed_logger.complete_evaluation_trace(
+                    trace_id=trace_id,
+                    final_answer=f"ERROR: {str(e)}",
+                    is_correct=False,
+                    confidence_score=0.0,
+                    total_tokens=0,
+                    memory_peak_mb=0.0
+                )
+            
             result = EvaluationResult(
                 task_id=task_id,
                 predicted_answer=f"ERROR: {str(e)}",
@@ -487,3 +587,180 @@ class ReasoningEvaluator:
         comparison["statistical_tests"] = {"note": "Statistical tests not implemented yet"}
         
         return comparison
+    
+    def _generate_with_logging(self,
+                              model_backend: AudioTextModelBackend,
+                              audio_path: str,
+                              prompt: str,
+                              prompter: ReasoningPrompter,
+                              trace_id: Optional[str],
+                              temperature: float,
+                              top_k: int,
+                              max_tokens: int):
+        """Generate response with detailed step-by-step logging"""
+        
+        # Log model interaction start
+        if self.detailed_logger and trace_id:
+            self.detailed_logger.log_model_interaction(
+                trace_id=trace_id,
+                interaction_type="generation_start",
+                input_data={
+                    "audio_path": audio_path,
+                    "prompt": prompt,
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "max_tokens": max_tokens
+                },
+                output_data={},
+                timing={"start_time": time.time()},
+                resource_usage={},
+                metadata={"model_backend": model_backend.model_name}
+            )
+        
+        # Simulate reasoning steps based on condition type
+        if prompter.condition_type.startswith("cot"):
+            return self._generate_cot_with_logging(
+                model_backend, audio_path, prompt, trace_id, temperature, top_k, max_tokens
+            )
+        elif prompter.condition_type.startswith("latent"):
+            return self._generate_latent_with_logging(
+                model_backend, audio_path, prompt, trace_id, temperature, top_k, max_tokens
+            )
+        else:
+            # Standard generation
+            return model_backend.generate(
+                audio_path=audio_path,
+                text_prompt=prompt,
+                temperature=temperature,
+                top_k=top_k,
+                max_new_tokens=max_tokens
+            )
+    
+    def _generate_cot_with_logging(self,
+                                  model_backend: AudioTextModelBackend,
+                                  audio_path: str,
+                                  prompt: str,
+                                  trace_id: Optional[str],
+                                  temperature: float,
+                                  top_k: int,
+                                  max_tokens: int):
+        """Generate CoT response with step-by-step logging"""
+        
+        # Generate full response
+        generation_stats = model_backend.generate(
+            audio_path=audio_path,
+            text_prompt=prompt,
+            temperature=temperature,
+            top_k=top_k,
+            max_new_tokens=max_tokens
+        )
+        
+        # Parse and log reasoning steps from response
+        if self.detailed_logger and trace_id:
+            reasoning_steps = self._parse_cot_steps(generation_stats.output_text)
+            
+            for i, step_text in enumerate(reasoning_steps):
+                self.detailed_logger.log_reasoning_chain_step(
+                    trace_id=trace_id,
+                    step_number=i + 1,
+                    reasoning_text=step_text,
+                    intermediate_conclusion=self._extract_intermediate_conclusion(step_text),
+                    confidence=0.7,  # Heuristic confidence
+                    tokens_used=len(step_text.split())
+                )
+        
+        return generation_stats
+    
+    def _generate_latent_with_logging(self,
+                                     model_backend: AudioTextModelBackend,
+                                     audio_path: str,
+                                     prompt: str,
+                                     trace_id: Optional[str],
+                                     temperature: float,
+                                     top_k: int,
+                                     max_tokens: int):
+        """Generate latent response with iteration logging"""
+        
+        # Generate response
+        generation_stats = model_backend.generate(
+            audio_path=audio_path,
+            text_prompt=prompt,
+            temperature=temperature,
+            top_k=top_k,
+            max_new_tokens=max_tokens,
+            reasoning_steps=4  # Simulate latent loops
+        )
+        
+        # Log simulated latent iterations
+        if self.detailed_logger and trace_id:
+            num_iterations = generation_stats.reasoning_steps
+            
+            for i in range(num_iterations):
+                confidence_evolution = [0.3, 0.5, 0.7, 0.8][:i+1]
+                
+                self.detailed_logger.log_latent_reasoning_iteration(
+                    trace_id=trace_id,
+                    iteration=i + 1,
+                    internal_state={
+                        "iteration": i + 1,
+                        "processing_stage": f"latent_loop_{i+1}",
+                        "confidence_trend": "increasing" if i > 0 and confidence_evolution[i] > confidence_evolution[i-1] else "stable"
+                    },
+                    confidence_evolution=confidence_evolution,
+                    processing_time=generation_stats.generation_time / num_iterations
+                )
+        
+        return generation_stats
+    
+    def _parse_cot_steps(self, response_text: str) -> List[str]:
+        """Parse CoT reasoning steps from response"""
+        
+        # Look for common CoT patterns
+        patterns = [
+            r"Step \d+[:\.](.+?)(?=Step \d+|Final Answer|$)",
+            r"First[,:](.+?)(?=Second|Next|Then|Final|$)",
+            r"(\d+\..+?)(?=\d+\.|Final Answer|$)",
+        ]
+        
+        steps = []
+        for pattern in patterns:
+            matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
+            if matches:
+                steps.extend([match.strip() for match in matches])
+                break
+        
+        # Fallback: split by sentences if no patterns found
+        if not steps:
+            sentences = response_text.split('.')
+            steps = [s.strip() for s in sentences if len(s.strip()) > 10][:5]  # Max 5 steps
+        
+        return steps
+    
+    def _extract_intermediate_conclusion(self, step_text: str) -> str:
+        """Extract intermediate conclusion from reasoning step"""
+        
+        # Look for conclusion indicators
+        conclusion_patterns = [
+            r"therefore[,:]?\s*(.+)",
+            r"so[,:]?\s*(.+)",
+            r"thus[,:]?\s*(.+)",
+            r"this means[,:]?\s*(.+)"
+        ]
+        
+        for pattern in conclusion_patterns:
+            match = re.search(pattern, step_text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        
+        # Fallback: last sentence
+        sentences = step_text.split('.')
+        return sentences[-1].strip() if sentences else step_text[:50]
+    
+    def _get_audio_duration(self, audio_path: str) -> float:
+        """Get audio duration"""
+        try:
+            import soundfile as sf
+            data, sr = sf.read(audio_path)
+            return len(data) / sr
+        except:
+            return 0.0

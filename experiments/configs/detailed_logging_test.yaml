@@ -1,0 +1,60 @@
+# Detailed Logging Test Configuration
+# Minimal test to validate comprehensive JSON logging
+
+name: "detailed_logging_test"
+description: "Test detailed JSON logging with comprehensive traces"
+output_dir: "experiments/results"
+
+# Model configuration
+model_backend: "kimia"
+model_path: "moonshotai/Kimi-Audio-7B-Instruct"
+load_detokenizer: true
+
+# Test both CoT and Latent conditions
+conditions:
+  - "cot_zero_shot"
+  - "cot_few_shot"
+  - "latent_silent"
+  - "latent_loops"
+
+# CoT parameters
+cot_chain_lengths: [0, 16]
+cot_self_consistency_k: [1]
+cot_use_skill_retrieval: true
+
+# Latent parameters
+latent_loop_depths: [0, 2, 4]
+latent_use_timestep_embeddings: true
+
+# Compute budget
+budget_matching: "tokens"
+max_total_tokens: 300
+max_generation_time: 15.0
+
+# Datasets for logging test
+datasets:
+  - "synthetic_count"
+  - "temporal_reasoning"
+max_samples_per_dataset: 3  # Small for testing
+noise_conditions:
+  - "clean"
+
+# Evaluation with comprehensive logging
+metrics:
+  - "accuracy"
+  - "token_efficiency"
+  - "latency"
+  - "calibration"
+eval_batch_size: 1
+
+# Sampling
+temperature: 0.0
+top_k: 5
+seeds: [42, 123]  # Multiple seeds for consistency testing
+
+# Logging - ensure everything is saved
+wandb_project: ""  # Disable W&B for pure JSON testing
+wandb_run_name: null
+save_predictions: true
+save_traces: true
+log_level: "INFO"
