@@ -68,6 +68,17 @@ def _download_with_progress(url: str, output_path: Path) -> None:
     
     try:
         print(f"📥 Starting download with Python urllib...")
+        
+        # Create SSL context that doesn't verify certificates (for OpenSLR)
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # Create opener with unverified SSL context
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context))
+        urllib.request.install_opener(opener)
+        
         urllib.request.urlretrieve(url, output_path, reporthook=progress_hook)
         print()  # New line after progress bar
     except Exception as e:
@@ -206,6 +217,7 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
                 download_cmd = [
                     "wget", 
                     "-c",  # continue partial downloads
+                    "--no-check-certificate",  # ignore SSL certificate issues
                     "--progress=bar:force:noscroll",  # show progress bar
                     "--show-progress",  # show progress even when not on tty
                     "-O", str(tar_file), 
@@ -226,6 +238,7 @@ def download_librispeech_subset(subset: str, cache_root: Path) -> Path:
                     "curl", 
                     "-L",  # follow redirects
                     "-C", "-",  # continue partial downloads
+                    "-k",  # ignore SSL certificate issues
                     "--progress-bar",  # show progress bar
                     "-o", str(tar_file), 
                     url
